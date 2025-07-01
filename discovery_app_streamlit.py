@@ -270,7 +270,7 @@ def create_pdf(export_df, company_info):
         
         for index, row in group.iterrows():
             # Handle favorite status
-            fav_char = " (Favorite)" if row['is_favorite'] else ""
+            fav_char = " (Favorite)" if row['favorite'] else ""
             question_text = f"Q: {row['question']}{fav_char}"
             answer_text = f"A: {row['answer']}"
 
@@ -288,7 +288,7 @@ def format_for_gdocs(export_df, company_info):
     for category, group in export_df.groupby('question_category'):
         doc_text.append(f"## {category}\n")
         for index, row in group.iterrows():
-            fav_char = " **(Favorite)**" if row['is_favorite'] else ""
+            fav_char = " **(Favorite)**" if row['favorite'] else ""
             doc_text.append(f"**Q: {row['question']}**{fav_char}\n")
             # Handle multi-line answers
             answer = row['answer'].replace('\n', '\n> ')
