@@ -34,9 +34,15 @@ conn = st.connection("snowflake")
 def save_answers_to_snowflake(df):
     """Saves the captured discovery answers to a Snowflake table."""
     try:
+        # FIX: Create a copy of the DataFrame to avoid changing the original.
+        df_to_save = df.copy()
+
+        # Convert all column names to uppercase to match Snowflake's default behavior.
+        df_to_save.columns = [col.upper() for col in df_to_save.columns]
+
         # USER INPUT REQUIRED: You must create/update the 'SALES_DISCOVERY_ANSWERS' table in Snowflake.
         # Ensure it includes an 'IS_FAVORITE' BOOLEAN column to match the exported data.
-        conn.write_pandas(df, "SALES_DISCOVERY_ANSWERS")
+        conn.write_pandas(df_to_save, "SALES_DISCOVERY_ANSWERS")
         return True
     except Exception as e:
         st.error(f"Error saving to Snowflake: {e}")
@@ -451,7 +457,7 @@ with tab1:
                         "question_category": category,
                         "question": question['text'],
                         "answer": answer,
-                        "is_favorite": question['favorite'],
+                        "favorite": question['favorite'],
                         "saved_at": datetime.utcnow()
                     })
             
