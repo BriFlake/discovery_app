@@ -79,8 +79,8 @@ def generate_discovery_questions(website, industry, competitor, persona):
     prompt = f"""
     You are an expert Snowflake sales engineer. Generate discovery questions for a potential customer with the title of **{persona}**.
     Company Information: Website: {website}, Industry: {industry}, Assumed Primary Competitor: {competitor}.
-    Generate three categories: **Technical Discovery**, **Business Discovery**, and exactly 10 questions for **Competitive Positioning vs. {competitor}**.
-    The total number of questions must not exceed 30. Return as a single, valid JSON object.
+    Generate three categories: **Technical Discovery**, **Business Discovery**, and exactly 5 questions for **Competitive Positioning vs. {competitor}**.
+    The total number of questions must not exceed 15. Return as a single, valid JSON object.
     """
     questions_dict = cortex_request(prompt)
     if questions_dict:
@@ -317,15 +317,12 @@ if 'company_summary' not in st.session_state: st.session_state.company_summary =
 if 'roadmap_df' not in st.session_state: st.session_state.roadmap_df = pd.DataFrame()
 if 'messages' not in st.session_state: st.session_state.messages = []
 
-# --- NEW: Callback function to reorder questions ---
 def move_question(category, index, direction):
     """Swaps a question with the one above or below it."""
     questions_list = st.session_state.questions[category]
     if direction == 'up' and index > 0:
-        # Swap with the previous item
         questions_list[index], questions_list[index - 1] = questions_list[index - 1], questions_list[index]
     elif direction == 'down' and index < len(questions_list) - 1:
-        # Swap with the next item
         questions_list[index], questions_list[index + 1] = questions_list[index + 1], questions_list[index]
 
 def toggle_favorite(q_id):
@@ -452,69 +449,50 @@ with tab1:
             for category, questions_list in st.session_state.questions.items():
                 if not questions_list: continue
 
-                with st.expander(f"**{category}** ({len(questions_list)} questions)", expanded=False):
-                    # --- UPDATED: Reordering with Up/Down buttons ---
-                    for i, question in enumerate(questions_list):
-                        q_col1, q_col2, q_col3 = st.columns([1, 1, 15])
-                        
-                        # Column 1: Up/Down reordering buttons
-                        with q_col1:
-                            st.button(
-                                "▲", 
-                                key=f"up_{question['id']}", 
-                                on_click=move_question, 
-                                args=(category, i, 'up'), 
-                                disabled=(i == 0),
-                                help="Move question up"
-                            )
-                            st.button(
-                                "▼", 
-                                key=f"down_{question['id']}", 
-                                on_click=move_question, 
-                                args=(category, i, 'down'),
-                                disabled=(i == len(questions_list) - 1),
-                                help="Move question down"
-                            )
-                        
-                        # Column 2: Favorite/Delete buttons
-                        with q_col2:
-                            fav_icon = "⭐" if question['favorite'] else "☆"
-                            st.button(fav_icon, key=f"fav_{question['id']}", on_click=toggle_favorite, args=(question['id'],), help="Toggle Favorite")
-                            st.button("🗑️", key=f"del_{question['id']}", on_click=delete_question, args=(question['id'],), help="Delete Question")
-                        
-                        # Column 3: Question text and answer box
-                        with q_col3:
-                            st.markdown(f"**Q: {question['text']}**")
-                            st.text_area(
-                                "Capture Answer",
-                                value=question['answer'],
-                                key=f"ans_{question['id']}",
-                                label_visibility="collapsed"
-                            )
+                # --- UPDATED: Use a stateful st.toggle to control visibility ---
+                # This ensures the open/closed state is preserved during reruns
+                toggle_key = f"toggle_{category.replace(' ', '_')}"
+                is_expanded = st.toggle(
+                    f"**{category}** ({len(questions_list)} questions)",
+                    key=toggle_key,
+                    value=st.session_state.get(toggle_key, False) # Default to False (open)
+                )
 
-                    st.markdown("---")
+                if is_expanded:
+                    container = st.container(border=True)
+                    with container:
+                        for i, question in enumerate(questions_list):
+                            q_col1, q_col2, q_col3 = st.columns([0.5, 0.7, 10])
+                            
+                            with q_col1:
+                                st.button("▲", key=f"up_{question['id']}", on_click=move_question, args=(category, i, 'up'), disabled=(i == 0), help="Move question up")
+                                st.button("▼", key=f"down_{question['id']}", on_click=move_question, args=(category, i, 'down'), disabled=(i == len(questions_list) - 1), help="Move question down")
+                            
+                            with q_col2:
+                                fav_icon = "⭐" if question['favorite'] else "☆"
+                                st.button(fav_icon, key=f"fav_{question['id']}", on_click=toggle_favorite, args=(question['id'],), help="Toggle Favorite")
+                                st.button("🗑️", key=f"del_{question['id']}", on_click=delete_question, args=(question['id'],), help="Delete Question")
+                            
+                            with q_col3:
+                                st.markdown(f"**Q: {question['text']}**")
+                                st.text_area("Capture Answer", value=question['answer'], key=f"ans_{question['id']}", label_visibility="collapsed")
+                        
+                        st.markdown("---")
 
-                    st.write("##### Add a Custom Question")
-                    custom_q_key = f"custom_q_{category.replace(' ', '_')}"
-                    st.text_input("Enter your question:", key=custom_q_key, placeholder="Type your custom question here...", label_visibility="collapsed")
-                    st.button("Add Question", key=f"add_q_{category.replace(' ', '_')}", on_click=add_custom_question, args=(category, custom_q_key))
+                        st.write("##### Add a Custom Question")
+                        custom_q_key = f"custom_q_{category.replace(' ', '_')}"
+                        st.text_input("Enter your question:", key=custom_q_key, placeholder="Type your custom question here...", label_visibility="collapsed")
+                        st.button("Add Question", key=f"add_q_{category.replace(' ', '_')}", on_click=add_custom_question, args=(category, custom_q_key))
 
-                    if st.button(f"Generate 5 More AI Questions", key=f"more_{category.replace(' ', '_')}", use_container_width=True):
-                        with st.spinner(f"Generating more questions for {category}..."):
-                            existing_q_texts = [q['text'] for q in questions_list]
-                            new_questions = generate_more_questions_for_category(
-                                st.session_state.company_info['website'],
-                                st.session_state.company_info['industry'],
-                                st.session_state.company_info['competitor'],
-                                st.session_state.company_info['persona'],
-                                category,
-                                existing_q_texts
-                            )
-                            if new_questions:
-                                st.session_state.questions[category].extend(new_questions)
-                                st.rerun()
-                            else:
-                                st.warning("Could not generate additional questions.")
+                        if st.button(f"Generate 5 More AI Questions", key=f"more_{category.replace(' ', '_')}", use_container_width=True):
+                            with st.spinner(f"Generating more questions for {category}..."):
+                                existing_q_texts = [q['text'] for q in questions_list]
+                                new_questions = generate_more_questions_for_category(st.session_state.company_info['website'], st.session_state.company_info['industry'], st.session_state.company_info['competitor'], st.session_state.company_info['persona'], category, existing_q_texts)
+                                if new_questions:
+                                    st.session_state.questions[category].extend(new_questions)
+                                    st.rerun()
+                                else:
+                                    st.warning("Could not generate additional questions.")
             st.divider()
 
         st.header("Step 3: Export or Save Responses")
@@ -541,32 +519,19 @@ with tab1:
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 pdf_bytes = create_notes_pdf_bytes(export_df, st.session_state.company_info)
-                st.download_button(
-                    label="📄 Generate PDF",
-                    data=pdf_bytes,
-                    file_name=f"discovery_notes_{company_name}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+                st.download_button("📄 Generate PDF", data=pdf_bytes, file_name=f"discovery_notes_{company_name}.pdf", mime="application/pdf", use_container_width=True)
             with col2:
-                st.download_button(
-                    label="📥 Download as CSV",
-                    data=export_df.to_csv(index=False).encode('utf-8'),
-                    file_name=f"discovery_notes_{company_name}.csv",
-                    mime='text/csv',
-                    use_container_width=True
-                )
+                st.download_button("📥 Download as CSV", data=export_df.to_csv(index=False).encode('utf-8'), file_name=f"discovery_notes_{company_name}.csv", mime='text/csv', use_container_width=True)
             with col3:
-                if st.button("💾 Save to Snowflake", use_container_width=True):
-                    with st.spinner("Saving to Snowflake..."):
-                        if save_answers_to_snowflake(export_df):
-                            st.success("Successfully saved responses to Snowflake!")
-
-            with col4:
                 if st.button("📋 Copy for Google Docs", use_container_width=True):
                     gdocs_text = format_for_gdocs(export_df, st.session_state.company_info)
                     st.text_area("Formatted Text", value=gdocs_text, height=300)
                     st.info("Use Ctrl+C or Cmd+C to copy the text above.", icon="📋")
+            with col4:
+                if st.button("💾 Save to Snowflake", use_container_width=True):
+                    with st.spinner("Saving to Snowflake..."):
+                        if save_answers_to_snowflake(export_df):
+                            st.success("Successfully saved responses to Snowflake!")
 
 with tab2:
     st.header("Chat About Snowflake Solutions")
@@ -588,10 +553,7 @@ with tab2:
             with st.chat_message("assistant"):
                 message_placeholder = st.empty()
                 with st.spinner("Claude is thinking..."):
-                    full_response = get_chatbot_response(
-                        st.session_state.company_info,
-                        st.session_state.messages
-                    )
+                    full_response = get_chatbot_response(st.session_state.company_info, st.session_state.messages)
                     message_placeholder.markdown(full_response)
 
             st.session_state.messages.append({"role": "assistant", "content": full_response})
