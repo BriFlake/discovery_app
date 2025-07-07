@@ -4,7 +4,9 @@ import streamlit as st
 import pandas as pd
 import uuid
 import json
+from fpdf import FPDF
 from datetime import datetime
+
 # USER ACTION: You may need to add 'fpdf' to your Streamlit in Snowflake environment.
 
 
@@ -19,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("❄️ Snowflake Sales Discovery Assistant")
-st.caption("An internal app for account research and discovery powered by Streamlit in Snowflake and Claude 3.5 Sonnet.")
+st.caption("An internal app for account research and discovery powered by Streamlit in Snowflake and Claude 3-5 Sonnet.")
 
 
 # ======================================================================================
@@ -27,21 +29,13 @@ st.caption("An internal app for account research and discovery powered by Stream
 # ======================================================================================
 
 # Establish a connection to Snowflake.
-# Streamlit in Snowflake handles the authentication securely.
-# USER INPUT REQUIRED: Ensure your Snowflake connection is configured.
 conn = st.connection("snowflake")
 
 def save_answers_to_snowflake(df):
     """Saves the captured discovery answers to a Snowflake table."""
     try:
-        # FIX: Create a copy of the DataFrame to avoid changing the original.
         df_to_save = df.copy()
-
-        # Convert all column names to uppercase to match Snowflake's default behavior.
         df_to_save.columns = [col.upper() for col in df_to_save.columns]
-
-        # USER INPUT REQUIRED: You must create/update the 'SALES_DISCOVERY_ANSWERS' table in Snowflake.
-        # Ensure it includes an 'IS_FAVORITE' BOOLEAN column to match the exported data.
         conn.write_pandas(df_to_save, "SALES_DISCOVERY_ANSWERS")
         return True
     except Exception as e:
@@ -49,40 +43,12 @@ def save_answers_to_snowflake(df):
         return False
 
 # ======================================================================================
-# LLM Functions powered by Snowflake Cortex (Claude 3.5 Sonnet)
+# LLM Functions powered by Snowflake Cortex (Claude 3-5 Sonnet)
 # ======================================================================================
 
-def generate_discovery_questions(website, industry, competitor, persona):
-    """
-    This function calls the Claude 3.5 Sonnet model via Snowflake Cortex
-    to generate discovery questions tailored to a specific persona.
-    """
-    
-    prompt = f"""
-    You are an expert Snowflake sales engineer. Your task is to generate a list of discovery questions for a potential customer, specifically tailored for a conversation with a person holding the title of **{persona}**.
-
-    Company Information:
-    - Website: {website}
-    - Industry: {industry}
-    - Assumed Primary Competitor: {competitor}
-    - Persona / Title of contact: {persona}
-
-    Based on the information above, please generate three categories of questions. The tone and focus of the questions should be highly relevant to the **{persona}**. For example, C-Level questions should be strategic, while engineer questions should be more technical.
-    
-    1.  **Technical Discovery**: Questions related to their current data architecture (ingestion, transformation, storage, usage).
-    2.  **Business Discovery**: Questions related to likely business challenges they face due to their industry and scale.
-    3.  **Competitive Positioning**: Exactly 10 questions designed to highlight Snowflake's advantages over '{competitor}'.
-
-    Constraints:
-    - The total number of questions across all categories must not exceed 30.
-    - You MUST return the output as a single, valid JSON object.
-    - The JSON object should have keys for the categories. The competitive category key should be named "Competitive Positioning: {competitor}".
-
-    Now, generate the persona-tailored questions for the company at {website}.
-    """
-
+def cortex_request(prompt):
+    """Generic function to make a request to Cortex and parse the response."""
     try:
-        # Manually escape single quotes for SQL and construct the query
         safe_prompt = prompt.replace("'", "''")
         sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
         
@@ -97,52 +63,116 @@ def generate_discovery_questions(website, industry, competitor, persona):
             
             if json_start != -1 and json_end != 0:
                 json_str = llm_response_str[json_start:json_end]
-                questions_dict = json.loads(json_str)
-                processed_questions = {}
-                for category, qs in questions_dict.items():
-                    processed_questions[category] = [
-                        {"id": str(uuid.uuid4()), "text": q, "answer": "", "favorite": False} for q in qs
-                    ]
-                return processed_questions
+                return json.loads(json_str)
             else:
                 st.error("Could not find a valid JSON object in the LLM's response.")
-                return {}
+                return None
         else:
             st.error("The LLM returned an empty response.")
-            return {}
-
+            return None
     except Exception as e:
         st.error(f"An error occurred while calling the LLM or parsing the response: {e}")
-        return {}
+        return None
+
+def generate_discovery_questions(website, industry, competitor, persona):
+    """Generates initial discovery questions."""
+    prompt = f"""
+    You are an expert Snowflake sales engineer. Generate discovery questions for a potential customer with the title of **{persona}**.
+    Company Information: Website: {website}, Industry: {industry}, Assumed Primary Competitor: {competitor}.
+    Generate three categories: **Technical Discovery**, **Business Discovery**, and exactly 10 questions for **Competitive Positioning vs. {competitor}**.
+    The total number of questions must not exceed 30. Return as a single, valid JSON object.
+    """
+    questions_dict = cortex_request(prompt)
+    if questions_dict:
+        processed_questions = {}
+        for category, qs in questions_dict.items():
+            if "Competitive Positioning" in category:
+                category = f"Competitive Positioning vs. {competitor}"
+            processed_questions[category] = [
+                {"id": str(uuid.uuid4()), "text": q, "answer": "", "favorite": False} for q in qs
+            ]
+        return processed_questions
+    return {}
 
 def generate_company_summary(website, industry, persona):
-    """
-    Calls Claude 3.5 Sonnet to generate a brief summary of a company, tailored to a persona.
-    """
+    """Generates a company summary."""
     prompt = f"""
-    You are a skilled business analyst. Based on the company website '{website}' and its industry '{industry}', please provide a concise, one-paragraph summary. 
-    The summary should be framed in a way that is most relevant and impactful for a person with the title of **{persona}**. It should touch upon the company's likely business model, its target customers, and potential data-related opportunities or challenges it might face.
+    You are a skilled business analyst. Based on the company website '{website}' and its industry '{industry}', provide a concise, one-paragraph summary relevant to a person with the title of **{persona}**.
+    Touch upon the company's likely business model, its target customers, and potential data-related opportunities or challenges.
     """
+    safe_prompt = prompt.replace("'", "''")
+    sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
     try:
-        # Manually escape single quotes for SQL and construct the query
-        safe_prompt = prompt.replace("'", "''")
-        sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
-
-        cursor = conn.cursor()
-        cursor.execute(sql_query)
-        response_row = cursor.fetchone()
-        if response_row and response_row[0]:
-            return response_row[0]
-        else:
-            return "Could not generate company summary."
+        response = conn.query(sql_query, show_spinner=False)
+        return response.iloc[0]['RESPONSE']
     except Exception as e:
         st.error(f"Error generating company summary: {e}")
         return "An error occurred while generating the summary."
 
+def generate_more_questions_for_category(website, industry, competitor, persona, category, existing_questions):
+    """Generates 5 more questions for a specific category."""
+    existing_questions_str = "\n".join([f"- {q}" for q in existing_questions])
+    prompt = f"""
+    You are an expert Snowflake sales engineer. For a **{persona}** at a company with website {website}, generate exactly 5 new and distinct discovery questions for the category '{category}'.
+    Do not repeat these existing questions: {existing_questions_str}.
+    Return your response as a single, valid JSON object with a key "new_questions" containing a list of strings.
+    """
+    response_dict = cortex_request(prompt)
+    if response_dict and "new_questions" in response_dict:
+        return [
+            {"id": str(uuid.uuid4()), "text": q, "answer": "", "favorite": False}
+            for q in response_dict["new_questions"]
+        ]
+    return []
+
+def generate_initiative_questions(website, industry, persona, initiative):
+    """Generates questions for a specific key initiative."""
+    prompt = f"""
+    You are an expert Snowflake sales engineer. For a **{persona}** at a company with website {website}, generate 5-7 insightful discovery questions that directly relate to the business initiative: **{initiative}**.
+    Return your response as a single, valid JSON object with a key "questions" containing a list of strings.
+    """
+    response_dict = cortex_request(prompt)
+    if response_dict and "questions" in response_dict:
+        return [
+            {"id": str(uuid.uuid4()), "text": q, "answer": "", "favorite": False}
+            for q in response_dict["questions"]
+        ]
+    return []
+
+def generate_roadmap(company_info, discovery_notes_str, priority):
+    """Generates a strategic roadmap."""
+    prompt = f"""
+    You are a world-class Snowflake Solution Architect creating a strategic roadmap for a potential customer.
+    **Customer Context:** Website: {company_info.get('website', 'N/A')}, Industry: {company_info.get('industry', 'N/A')}, Persona: {company_info.get('persona', 'N/A')}.
+    **Discovery Notes:**
+    {discovery_notes_str}
+    **Roadmap Requirements:**
+    1. Analyze the notes to identify key pain points and business objectives.
+    2. Propose a logical sequence of 2-4 implementation projects using Snowflake.
+    3. For each project, provide a `project_name`, `description`, `business_value` ('Low', 'Medium', 'High', 'Very High'), and `level_of_effort` ('Low', 'Medium', 'High').
+    4. Order the roadmap based on this priority: **{priority}**.
+    5. You MUST return the output as a single, valid JSON object with a key "roadmap" which is a list of project objects.
+
+    **Example JSON Output:**
+    {{
+      "roadmap": [
+        {{
+          "project_name": "Phase 1: Centralized Data Ingestion",
+          "description": "Implement a data lake in Snowflake by consolidating raw data from sources X, Y, and Z using Snowpipe.",
+          "business_value": "Medium",
+          "level_of_effort": "Low"
+        }}
+      ]
+    }}
+    Now, generate the strategic roadmap.
+    """
+    response_dict = cortex_request(prompt)
+    if response_dict and "roadmap" in response_dict:
+        return pd.DataFrame(response_dict["roadmap"])
+    return pd.DataFrame()
+
 def get_chatbot_response(company_info, chat_history):
-    """
-    This function calls Claude 3.5 Sonnet via Snowflake Cortex to generate a response for the chat interface.
-    """
+    """Generates a response for the chat interface."""
     history_str = ""
     for message in chat_history:
         role = "User" if message['role'] == 'user' else "Assistant"
@@ -150,167 +180,154 @@ def get_chatbot_response(company_info, chat_history):
 
     prompt = f"""
     You are a helpful Snowflake sales assistant chatbot. Your goal is to answer user questions about how Snowflake's technology can help a specific company.
-
     You have the following context:
     - Company Website: {company_info.get('website', 'N/A')}
     - Industry: {company_info.get('industry', 'N/A')}
     - Assumed Primary Competitor: {company_info.get('competitor', 'N/A')}
     - Contact's Title: {company_info.get('persona', 'N/A')}
-
     You also have the conversation history:
     {history_str}
-
     Based on all of this context, provide a concise and helpful answer to the last user question, keeping the contact's title in mind. Address the user directly. Do not repeat the question.
     """
-
+    safe_prompt = prompt.replace("'", "''")
+    sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
     try:
-        # Manually escape single quotes for SQL and construct the query
-        safe_prompt = prompt.replace("'", "''")
-        sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
-
-        cursor = conn.cursor()
-        cursor.execute(sql_query)
-        response_row = cursor.fetchone()
-        
-        if response_row and response_row[0]:
-            return response_row[0]
-        else:
-            return "I'm sorry, I couldn't generate a response. Please try again."
-
+        response = conn.query(sql_query, show_spinner=False)
+        return response.iloc[0]['RESPONSE']
     except Exception as e:
         st.error(f"Error calling LLM: {e}")
         return "There was an error communicating with the assistant."
 
-def generate_more_questions_for_category(website, industry, competitor, persona, category, existing_questions):
-    """
-    Calls Claude 3.5 Sonnet to generate additional questions for a specific category.
-    """
-    existing_questions_str = "\n".join([f"- {q}" for q in existing_questions])
-
-    prompt = f"""
-    You are an expert Snowflake sales engineer. Your task is to generate additional discovery questions for a potential customer, specifically for the category '{category}' and tailored for a conversation with a **{persona}**.
-
-    Company Information:
-    - Website: {website}
-    - Industry: {industry}
-    - Assumed Primary Competitor: {competitor}
-    - Persona / Title of contact: {persona}
-
-    You have already generated the following questions for the '{category}' category:
-    {existing_questions_str}
-
-    Now, please generate exactly 5 **new and distinct** questions for this category. These questions should not repeat the ones listed above. The new questions should maintain the same focus and tone appropriate for the persona.
-
-    Return your response as a single, valid JSON object containing a list of strings.
-    Example JSON structure:
-    {{
-      "new_questions": [
-        "New Question 1...",
-        "New Question 2...",
-        "New Question 3...",
-        "New Question 4...",
-        "New Question 5..."
-      ]
-    }}
-    """
-
-    try:
-        # Manually escape single quotes for SQL and construct the query
-        safe_prompt = prompt.replace("'", "''")
-        sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
-        
-        cursor = conn.cursor()
-        cursor.execute(sql_query)
-        response_row = cursor.fetchone()
-        
-        if response_row and response_row[0]:
-            llm_response_str = response_row[0]
-            json_start = llm_response_str.find('{')
-            json_end = llm_response_str.rfind('}') + 1
-            
-            if json_start != -1 and json_end != 0:
-                json_str = llm_response_str[json_start:json_end]
-                new_questions_dict = json.loads(json_str)
-                new_qs_list = new_questions_dict.get("new_questions", [])
-                
-                # Process into the standard format
-                processed_questions = [
-                    {"id": str(uuid.uuid4()), "text": q, "answer": "", "favorite": False} for q in new_qs_list
-                ]
-                return processed_questions
-            else:
-                st.error("Could not find a valid JSON object in the LLM's response for additional questions.")
-                return []
-        else:
-            st.error("The LLM returned an empty response when generating more questions.")
-            return []
-
-    except Exception as e:
-        st.error(f"An error occurred while generating more questions: {e}")
-        return []
-
 # ======================================================================================
-# Helper Functions for Exporting
+# Helper Functions for UI, State, and Exporting
 # ======================================================================================
 
-def create_pdf(export_df, company_info):
-    """Generates a PDF from the exported data."""
-    pdf = FPDF()
+class PDF(FPDF):
+    def __init__(self, orientation='P', unit='mm', format='A4', title=''):
+        super().__init__(orientation, unit, format)
+        self.title = title
+    def header(self):
+        self.set_font("Helvetica", "B", 12)
+        self.cell(0, 10, self.title, 0, 0, 'C')
+        self.ln(10)
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Helvetica", "I", 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+def create_notes_pdf_bytes(export_df, company_info):
+    """Generates a PDF for discovery notes."""
+    pdf = PDF(title='Snowflake Discovery Notes')
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, f"Discovery Notes: {company_info.get('website')}", 0, 1, 'C')
+
+    clean_website = company_info.get('website', 'N/A').encode('latin-1', 'replace').decode('latin-1')
+    pdf.cell(0, 10, f"Discovery Notes: {clean_website}", 0, 1, 'C')
+    pdf.ln(5)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 5, f"Industry: {company_info.get('industry', 'N/A')}", 0, 1)
+    pdf.cell(0, 5, f"Persona: {company_info.get('persona', 'N/A')}", 0, 1)
+    pdf.cell(0, 5, f"Assumed Competitor: {company_info.get('competitor', 'N/A')}", 0, 1)
     pdf.ln(10)
 
-    # Group data by category to structure the PDF
     for category, group in export_df.groupby('question_category'):
         pdf.set_font("Helvetica", "B", 12)
-        # Encode to latin-1, replacing unsupported characters
         clean_category = category.encode('latin-1', 'replace').decode('latin-1')
-        pdf.cell(0, 10, clean_category, 0, 1)
-        
-        for index, row in group.iterrows():
-            # Handle favorite status
+        pdf.cell(0, 10, clean_category, 0, 1, 'L', True)
+        pdf.ln(2)
+
+        for _, row in group.iterrows():
             fav_char = " (Favorite)" if row['favorite'] else ""
             question_text = f"Q: {row['question']}{fav_char}"
-            answer_text = f"A: {row['answer']}"
+            answer_text = f"A: {row['answer'] if row['answer'] else 'No answer provided.'}"
 
             pdf.set_font("Helvetica", "B", 10)
             pdf.multi_cell(0, 5, question_text.encode('latin-1', 'replace').decode('latin-1'))
             pdf.set_font("Helvetica", "", 10)
             pdf.multi_cell(0, 5, answer_text.encode('latin-1', 'replace').decode('latin-1'))
             pdf.ln(5)
-    
+
+    return pdf.output(dest='S').encode('latin-1')
+
+def create_roadmap_pdf_bytes(roadmap_df, company_info):
+    """Generates a PDF for the strategic roadmap."""
+    pdf = PDF(title=f"Strategic Roadmap for {company_info.get('website')}")
+    pdf.add_page()
+
+    for _, row in roadmap_df.iterrows():
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.multi_cell(0, 7, f"Project: {row.get('project_name', 'N/A')}".encode('latin-1', 'replace').decode('latin-1'))
+        pdf.ln(2)
+
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(40, 7, "Business Value:")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(0, 7, str(row.get('business_value', 'N/A')))
+        pdf.ln()
+
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(40, 7, "Level of Effort:")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(0, 7, str(row.get('level_of_effort', 'N/A')))
+        pdf.ln()
+
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.multi_cell(0, 5, "Description:")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 5, str(row.get('description', 'N/A')).encode('latin-1', 'replace').decode('latin-1'))
+        pdf.ln(7)
+
     return pdf.output(dest='S').encode('latin-1')
 
 def format_for_gdocs(export_df, company_info):
-    """Formats the data into a markdown string for easy copy-pasting."""
+    """Formats notes for Google Docs, respecting answered/unanswered sorting."""
     doc_text = [f"# Discovery Notes: {company_info.get('website')}\n"]
-    for category, group in export_df.groupby('question_category'):
-        doc_text.append(f"## {category}\n")
-        for index, row in group.iterrows():
-            fav_char = " **(Favorite)**" if row['favorite'] else ""
-            doc_text.append(f"**Q: {row['question']}**{fav_char}\n")
-            # Handle multi-line answers
-            answer = row['answer'].replace('\n', '\n> ')
-            doc_text.append(f"> {answer if answer else 'No answer provided.'}\n")
-        doc_text.append("---\n")
+
+    if 'answer' not in export_df.columns:
+        export_df['answer'] = ''
+    export_df['answer'] = export_df['answer'].fillna('').astype(str)
+
+    answered_df = export_df[export_df['answer'].str.strip() != ''].copy()
+    unanswered_df = export_df[export_df['answer'].str.strip() == ''].copy()
+
+    if not answered_df.empty:
+        doc_text.append("\n## Answered Questions\n")
+        for category, group in answered_df.groupby('question_category'):
+            doc_text.append(f"### {category}\n")
+            for _, row in group.iterrows():
+                fav_char = " **(Favorite)**" if row['favorite'] else ""
+                doc_text.append(f"**Q: {row['question']}**{fav_char}\n")
+                answer = str(row['answer']).replace('\n', '\n> ')
+                doc_text.append(f"> {answer}\n")
+
+    if not unanswered_df.empty:
+        doc_text.append("\n---\n## Unanswered Questions\n")
+        for category, group in unanswered_df.groupby('question_category'):
+            doc_text.append(f"### {category}\n")
+            for _, row in group.iterrows():
+                doc_text.append(f"- {row['question']}\n")
+
     return "\n".join(doc_text)
 
-# ======================================================================================
-# Main App Logic
-# ======================================================================================
-
 # Initialize session state
-if 'questions' not in st.session_state:
-    st.session_state.questions = {}
-if 'company_info' not in st.session_state:
-    st.session_state.company_info = {}
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "company_summary" not in st.session_state:
-    st.session_state.company_summary = ""
+if 'questions' not in st.session_state: st.session_state.questions = {}
+if 'company_info' not in st.session_state: st.session_state.company_info = {}
+if 'company_summary' not in st.session_state: st.session_state.company_summary = ""
+if 'roadmap_df' not in st.session_state: st.session_state.roadmap_df = pd.DataFrame()
+if 'messages' not in st.session_state: st.session_state.messages = []
 
-# Callback functions
+# --- NEW: Callback function to reorder questions ---
+def move_question(category, index, direction):
+    """Swaps a question with the one above or below it."""
+    questions_list = st.session_state.questions[category]
+    if direction == 'up' and index > 0:
+        # Swap with the previous item
+        questions_list[index], questions_list[index - 1] = questions_list[index - 1], questions_list[index]
+    elif direction == 'down' and index < len(questions_list) - 1:
+        # Swap with the next item
+        questions_list[index], questions_list[index + 1] = questions_list[index + 1], questions_list[index]
+
 def toggle_favorite(q_id):
     for category in st.session_state.questions:
         for question in st.session_state.questions[category]:
@@ -322,62 +339,96 @@ def delete_question(q_id):
     for category, questions_list in st.session_state.questions.items():
         st.session_state.questions[category] = [q for q in questions_list if q['id'] != q_id]
 
+def add_custom_question(category, text_input_key):
+    question_text = st.session_state[text_input_key]
+    if question_text:
+        new_question = {
+            "id": str(uuid.uuid4()),
+            "text": question_text,
+            "answer": "",
+            "favorite": False
+        }
+        if category in st.session_state.questions:
+            st.session_state.questions[category].append(new_question)
+        st.session_state[text_input_key] = ""
+
 def clear_session():
-    keys_to_clear = ['questions', 'company_info', 'messages', 'company_summary']
+    keys_to_clear = ['questions', 'company_info', 'messages', 'company_summary', 'roadmap_df']
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
-    # Also clear widget states
-    for key in list(st.session_state.keys()):
-        if key.startswith("ans_") or key.startswith("fav_") or key.startswith("del_"):
-            del st.session_state[key]
+    st.rerun()
 
+# ======================================================================================
+# Main App Logic
+# ======================================================================================
 
-# Create tabs
-tab1, tab2 = st.tabs(["Account Research & Discovery", "Snowflake Solution Chatter"])
+tab1, tab2, tab3 = st.tabs(["**1. Account Research & Discovery**", "**2. Snowflake Solution Chatter**", "**3. Strategic Roadmap**"])
 
-# --------------------------------------------------------------------------------------
-# TAB 1: Account Research & Discovery
-# --------------------------------------------------------------------------------------
 with tab1:
     col_header1, col_header2 = st.columns([4, 1])
     with col_header1:
-        st.header("Step 1: Research an Account")
+        st.header("Step 1: Research Account & Generate Questions")
     with col_header2:
         if st.button("Clear & Restart Session", use_container_width=True):
             clear_session()
-            st.rerun()
 
-    st.markdown("Enter the company's details to generate a persona-tailored summary and discovery questions.")
-    
+    st.markdown("Enter the company's details to generate a persona-tailored summary and discovery questions, including for key business initiatives.")
+
     with st.form("research_form"):
         website = st.text_input("**Company Website**", placeholder="e.g., https://www.example.com", value=st.session_state.company_info.get('website', ''))
         industry = st.text_input("**Industry**", placeholder="e.g., Retail, Financial Services", value=st.session_state.company_info.get('industry', ''))
-        
+
         persona_options = ["C-Level (CEO, CIO, CDO)", "VP of Engineering / Data", "Director of Analytics / BI", "Data Scientist / ML Engineer", "Data/Analytics Engineer"]
+        persona_idx = persona_options.index(st.session_state.company_info.get('persona', "C-Level (CEO, CIO, CDO)")) if st.session_state.company_info.get('persona') in persona_options else 0
         persona = st.selectbox(
             "**Select Title of Person You're Meeting With**",
             persona_options,
-            index=persona_options.index(st.session_state.company_info.get('persona', "C-Level (CEO, CIO, CDO)"))
+            index=persona_idx
         )
 
+        competitor_options = ["Databricks", "Microsoft Fabric", "AWS", "Do Nothing (i.e., keep existing technology)"]
+        competitor_idx = competitor_options.index(st.session_state.company_info.get('competitor', 'Databricks')) if st.session_state.company_info.get('competitor') in competitor_options else 0
         competitor = st.selectbox(
             "**Select Primary Competitor**",
-            ("Databricks", "Microsoft Fabric", "AWS", "Do Nothing (i.e., keep existing technology)"),
-            index=["Databricks", "Microsoft Fabric", "AWS", "Do Nothing (i.e., keep existing technology)"].index(st.session_state.company_info.get('competitor', 'Databricks'))
+            competitor_options,
+            index=competitor_idx
         )
+
+        st.markdown("---")
+        initiatives_options = ["Grow Revenue", "Reduce Risk", "Manage Costs", "Innovate", "Other"]
+        selected_initiatives = st.multiselect(
+            "**Select Suspected Key Initiatives (Optional)**",
+            options=initiatives_options,
+            help="This will generate an additional section of questions for each selected initiative."
+        )
+        other_initiative = st.text_input("**If 'Other', please specify:**", placeholder="e.g., Improve Customer Experience")
+        st.markdown("---")
+        
         research_button = st.form_submit_button("Generate Summary & Questions", type="primary")
 
     if research_button:
         if not website or not industry:
             st.warning("Please provide both a website and an industry.")
         else:
-            with st.spinner("Researching company and generating content..."):
+            with st.spinner("Researching company and generating all questions..."):
                 st.session_state.company_info = {'website': website, 'industry': industry, 'competitor': competitor, 'persona': persona}
                 st.session_state.company_summary = generate_company_summary(website, industry, persona)
-                st.session_state.questions = generate_discovery_questions(website, industry, competitor, persona)
-                if not st.session_state.questions:
-                    st.error("Failed to generate questions. Please check the error messages above.")
+                
+                all_questions = generate_discovery_questions(website, industry, competitor, persona)
+
+                final_initiatives = [init for init in selected_initiatives if init != "Other"]
+                if "Other" in selected_initiatives and other_initiative:
+                    final_initiatives.append(other_initiative)
+
+                for initiative in final_initiatives:
+                    initiative_questions = generate_initiative_questions(website, industry, persona, initiative)
+                    if initiative_questions:
+                        all_questions[f"Initiative: {initiative}"] = initiative_questions
+                    else:
+                        st.warning(f"Could not generate questions for the '{initiative}' initiative.")
+                
+                st.session_state.questions = all_questions
                 st.rerun()
 
     st.divider()
@@ -391,22 +442,64 @@ with tab1:
             st.header("Step 2: Ask Questions and Capture Responses")
             st.markdown(f"Discovery questions for **{st.session_state.company_info.get('website')}**")
 
-            # Update answers from widget state before displaying
-            for category, questions_list in st.session_state.questions.items():
-                for question in questions_list:
-                    widget_key = f"ans_{question['id']}"
-                    if widget_key in st.session_state:
-                        question['answer'] = st.session_state[widget_key]
+            # First, update all answers from the text areas into the session state list
+            for cat, q_list in st.session_state.questions.items():
+                 for q in q_list:
+                      widget_key = f"ans_{q['id']}"
+                      if widget_key in st.session_state:
+                           q['answer'] = st.session_state[widget_key]
 
             for category, questions_list in st.session_state.questions.items():
                 if not questions_list: continue
-                
-                cat_col1, cat_col2 = st.columns([3, 1])
-                with cat_col1:
-                    st.subheader(category)
-                with cat_col2:
-                    # Button to generate more questions for the current category
-                    if st.button(f"Generate 5 More", key=f"more_{category.replace(' ', '_')}", use_container_width=True):
+
+                with st.expander(f"**{category}** ({len(questions_list)} questions)", expanded=False):
+                    # --- UPDATED: Reordering with Up/Down buttons ---
+                    for i, question in enumerate(questions_list):
+                        q_col1, q_col2, q_col3 = st.columns([1, 1, 15])
+                        
+                        # Column 1: Up/Down reordering buttons
+                        with q_col1:
+                            st.button(
+                                "▲", 
+                                key=f"up_{question['id']}", 
+                                on_click=move_question, 
+                                args=(category, i, 'up'), 
+                                disabled=(i == 0),
+                                help="Move question up"
+                            )
+                            st.button(
+                                "▼", 
+                                key=f"down_{question['id']}", 
+                                on_click=move_question, 
+                                args=(category, i, 'down'),
+                                disabled=(i == len(questions_list) - 1),
+                                help="Move question down"
+                            )
+                        
+                        # Column 2: Favorite/Delete buttons
+                        with q_col2:
+                            fav_icon = "⭐" if question['favorite'] else "☆"
+                            st.button(fav_icon, key=f"fav_{question['id']}", on_click=toggle_favorite, args=(question['id'],), help="Toggle Favorite")
+                            st.button("🗑️", key=f"del_{question['id']}", on_click=delete_question, args=(question['id'],), help="Delete Question")
+                        
+                        # Column 3: Question text and answer box
+                        with q_col3:
+                            st.markdown(f"**Q: {question['text']}**")
+                            st.text_area(
+                                "Capture Answer",
+                                value=question['answer'],
+                                key=f"ans_{question['id']}",
+                                label_visibility="collapsed"
+                            )
+
+                    st.markdown("---")
+
+                    st.write("##### Add a Custom Question")
+                    custom_q_key = f"custom_q_{category.replace(' ', '_')}"
+                    st.text_input("Enter your question:", key=custom_q_key, placeholder="Type your custom question here...", label_visibility="collapsed")
+                    st.button("Add Question", key=f"add_q_{category.replace(' ', '_')}", on_click=add_custom_question, args=(category, custom_q_key))
+
+                    if st.button(f"Generate 5 More AI Questions", key=f"more_{category.replace(' ', '_')}", use_container_width=True):
                         with st.spinner(f"Generating more questions for {category}..."):
                             existing_q_texts = [q['text'] for q in questions_list]
                             new_questions = generate_more_questions_for_category(
@@ -422,72 +515,59 @@ with tab1:
                                 st.rerun()
                             else:
                                 st.warning("Could not generate additional questions.")
-                
-                for i, question in enumerate(questions_list):
-                    q_col1, q_col2 = st.columns([1, 15])
-                    with q_col1:
-                        fav_icon = "⭐" if question['favorite'] else "☆"
-                        st.button(fav_icon, key=f"fav_{question['id']}", on_click=toggle_favorite, args=(question['id'],), help="Toggle Favorite")
-                        st.button("🗑️", key=f"del_{question['id']}", on_click=delete_question, args=(question['id'],), help="Delete Question")
-                    with q_col2:
-                        st.markdown(f"**Q: {question['text']}**")
-                        st.text_area(
-                            "Capture Answer", 
-                            value=question['answer'],
-                            key=f"ans_{question['id']}",
-                            label_visibility="collapsed"
-                        )
-            
             st.divider()
 
-            st.header("Step 3: Export or Save Responses")
-            st.markdown("Once you have captured the answers, you can export them or save them directly to Snowflake.")
+        st.header("Step 3: Export or Save Responses")
+        st.markdown("Once you have captured the answers, you can export them or save them directly to Snowflake.")
 
-            # Prepare data for export, ensuring all answers are captured from the latest state
-            export_data = []
-            company_name = st.session_state.company_info.get('website', 'N/A').replace('https://','').replace('www.','').split('.')[0].capitalize()
-            for category, questions_list in st.session_state.questions.items():
-                for question in questions_list:
-                    # Get the most recent answer from the widget's state
-                    answer = st.session_state.get(f"ans_{question['id']}", question['answer'])
-                    export_data.append({
-                        "id": question['id'],
-                        "company_name": company_name,
-                        "company_website": st.session_state.company_info.get('website', 'N/A'),
-                        "question_category": category,
-                        "question": question['text'],
-                        "answer": answer,
-                        "favorite": question['favorite'],
-                        "saved_at": datetime.utcnow()
-                    })
-            
-            if export_data:
-                export_df = pd.DataFrame(export_data)
+        export_data = []
+        company_name = st.session_state.company_info.get('website', 'N/A').replace('https://','').replace('www.','').split('.')[0].capitalize()
+        for category, questions_list in st.session_state.questions.items():
+            for question in questions_list:
+                export_data.append({
+                    "id": question['id'],
+                    "company_name": company_name,
+                    "company_website": st.session_state.company_info.get('website', 'N/A'),
+                    "question_category": category,
+                    "question": question['text'],
+                    "answer": question['answer'],
+                    "favorite": question['favorite'],
+                    "saved_at": datetime.utcnow()
+                })
 
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.download_button(
-                        label="📥 Download as CSV",
-                        data=export_df.to_csv(index=False).encode('utf-8'),
-                        file_name=f"discovery_notes_{company_name}.csv",
-                        mime='text/csv',
-                    )
-                with col2:
-                    if st.button("💾 Save to Snowflake"):
-                        with st.spinner("Saving to Snowflake..."):
-                            if save_answers_to_snowflake(export_df):
-                                st.success("Successfully saved responses to Snowflake!")
+        if export_data:
+            export_df = pd.DataFrame(export_data)
 
-                with col3:
-                    if st.button("✅ Copy for Google Docs"):
-                        gdocs_text = format_for_gdocs(export_df, st.session_state.company_info)
-                        st.text_area("Formatted Text", value=gdocs_text, height=1000)
-                        st.info("Use Ctrl+C or Cmd+C to copy the text above.", icon="📋")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                pdf_bytes = create_notes_pdf_bytes(export_df, st.session_state.company_info)
+                st.download_button(
+                    label="📄 Generate PDF",
+                    data=pdf_bytes,
+                    file_name=f"discovery_notes_{company_name}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+            with col2:
+                st.download_button(
+                    label="📥 Download as CSV",
+                    data=export_df.to_csv(index=False).encode('utf-8'),
+                    file_name=f"discovery_notes_{company_name}.csv",
+                    mime='text/csv',
+                    use_container_width=True
+                )
+            with col3:
+                if st.button("💾 Save to Snowflake", use_container_width=True):
+                    with st.spinner("Saving to Snowflake..."):
+                        if save_answers_to_snowflake(export_df):
+                            st.success("Successfully saved responses to Snowflake!")
 
+            with col4:
+                if st.button("📋 Copy for Google Docs", use_container_width=True):
+                    gdocs_text = format_for_gdocs(export_df, st.session_state.company_info)
+                    st.text_area("Formatted Text", value=gdocs_text, height=300)
+                    st.info("Use Ctrl+C or Cmd+C to copy the text above.", icon="📋")
 
-# --------------------------------------------------------------------------------------
-# TAB 2: Snowflake Solution Chatter
-# --------------------------------------------------------------------------------------
 with tab2:
     st.header("Chat About Snowflake Solutions")
 
@@ -495,7 +575,7 @@ with tab2:
         st.info("Please research an account on the first tab to activate the chat.")
     else:
         st.markdown(f"Ask questions about how Snowflake can help **{st.session_state.company_info.get('website')}**.")
-        
+
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
@@ -509,9 +589,78 @@ with tab2:
                 message_placeholder = st.empty()
                 with st.spinner("Claude is thinking..."):
                     full_response = get_chatbot_response(
-                        st.session_state.company_info, 
+                        st.session_state.company_info,
                         st.session_state.messages
                     )
                     message_placeholder.markdown(full_response)
-            
+
             st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+with tab3:
+    st.header("Generate a Strategic Roadmap")
+
+    if not st.session_state.questions:
+        st.info("Please complete the research on the **'1. Account Research & Discovery'** tab first.")
+    else:
+        # Sync answers from widgets before generating roadmap
+        for category, questions_list in st.session_state.questions.items():
+            for question in questions_list:
+                widget_key = f"ans_{question['id']}"
+                if widget_key in st.session_state:
+                    question['answer'] = st.session_state[widget_key]
+
+        notes_list = []
+        for category, questions_list in st.session_state.questions.items():
+            for q in questions_list:
+                answer = str(q.get('answer', '')).strip()
+                if answer:
+                    notes_list.append(f"Category: {category}\nQ: {q['text']}\nA: {answer}\n")
+
+        discovery_notes_str = "\n".join(notes_list)
+
+        if not discovery_notes_str:
+            st.warning("Please answer at least one question on the first tab to generate a roadmap.")
+        else:
+            st.markdown("Based on the captured discovery answers, generate a potential implementation plan.")
+            priority = st.radio(
+                "**Prioritize roadmap by:**",
+                ("Quick Wins (Lowest Effort First)", "Highest Business Value First"),
+                horizontal=True,
+            )
+
+            if st.button("🚀 Generate Strategic Roadmap", type="primary"):
+                with st.spinner("Claude is architecting the solution..."):
+                    st.session_state.roadmap_df = generate_roadmap(
+                        st.session_state.company_info,
+                        discovery_notes_str,
+                        priority
+                    )
+
+    if not st.session_state.roadmap_df.empty:
+        st.divider()
+        st.subheader("Generated Roadmap")
+
+        st.dataframe(st.session_state.roadmap_df, use_container_width=True)
+
+        st.subheader("Export Roadmap")
+        roadmap_col1, roadmap_col2 = st.columns(2)
+        company_name = st.session_state.company_info.get('website', 'N/A').replace('https://','').replace('www.','').split('.')[0].capitalize()
+
+        with roadmap_col1:
+            pdf_bytes = create_roadmap_pdf_bytes(st.session_state.roadmap_df, st.session_state.company_info)
+            st.download_button(
+                label="📄 Download Roadmap as PDF",
+                data=pdf_bytes,
+                file_name=f"roadmap_{company_name}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        with roadmap_col2:
+            csv_data = st.session_state.roadmap_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Roadmap as CSV",
+                data=csv_data,
+                file_name=f"roadmap_{company_name}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
