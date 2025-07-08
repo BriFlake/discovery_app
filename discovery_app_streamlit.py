@@ -6,6 +6,7 @@ import uuid
 import json
 from fpdf import FPDF
 from datetime import datetime
+import re
 
 # USER ACTION: You may need to add 'fpdf' to your Streamlit in Snowflake environment.
 
@@ -79,8 +80,8 @@ def generate_discovery_questions(website, industry, competitor, persona):
     prompt = f"""
     You are an expert Snowflake sales engineer. Generate discovery questions for a potential customer with the title of **{persona}**.
     Company Information: Website: {website}, Industry: {industry}, Assumed Primary Competitor: {competitor}.
-    Generate three categories: **Technical Discovery**, **Business Discovery**, and exactly 5 questions for **Competitive Positioning vs. {competitor}**.
-    The total number of questions must not exceed 15. Return as a single, valid JSON object.
+    Generate three categories: **Technical Discovery**, **Business Discovery**, and exactly 10 questions for **Competitive Positioning vs. {competitor}**.
+    The total number of questions must not exceed 30. Return as a single, valid JSON object.
     """
     questions_dict = cortex_request(prompt)
     if questions_dict:
@@ -152,19 +153,6 @@ def generate_roadmap(company_info, discovery_notes_str, priority):
     3. For each project, provide a `project_name`, `description`, `business_value` ('Low', 'Medium', 'High', 'Very High'), and `level_of_effort` ('Low', 'Medium', 'High').
     4. Order the roadmap based on this priority: **{priority}**.
     5. You MUST return the output as a single, valid JSON object with a key "roadmap" which is a list of project objects.
-
-    **Example JSON Output:**
-    {{
-      "roadmap": [
-        {{
-          "project_name": "Phase 1: Centralized Data Ingestion",
-          "description": "Implement a data lake in Snowflake by consolidating raw data from sources X, Y, and Z using Snowpipe.",
-          "business_value": "Medium",
-          "level_of_effort": "Low"
-        }}
-      ]
-    }}
-    Now, generate the strategic roadmap.
     """
     response_dict = cortex_request(prompt)
     if response_dict and "roadmap" in response_dict:
@@ -187,7 +175,7 @@ def get_chatbot_response(company_info, chat_history):
     - Contact's Title: {company_info.get('persona', 'N/A')}
     You also have the conversation history:
     {history_str}
-    Based on all of this context, provide a concise and helpful answer to the last user question, keeping the contact's title in mind. Address the user directly. Do not repeat the question.
+    Based on all of this context, provide a concise and helpful answer to the last user question.
     """
     safe_prompt = prompt.replace("'", "''")
     sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
@@ -197,6 +185,30 @@ def get_chatbot_response(company_info, chat_history):
     except Exception as e:
         st.error(f"Error calling LLM: {e}")
         return "There was an error communicating with the assistant."
+
+def autofill_answers_from_notes(notes_text, questions_dict):
+    """Uses LLM to populate answers to questions based on freeform notes."""
+    prompt = f"""
+    You are an intelligent assistant. Your task is to populate answers to a list of discovery questions based on a provided block of freeform notes.
+
+    **Source Notes:**
+    ---
+    {notes_text}
+    ---
+
+    **Questions to Answer (JSON format):**
+    ---
+    {json.dumps(questions_dict, indent=2)}
+    ---
+
+    **Instructions:**
+    1. Read through the **Source Notes** carefully.
+    2. For each question in the **Questions to Answer** JSON object, find the relevant information within the notes.
+    3. Formulate a concise answer for each question based *only* on the information present in the notes.
+    4. If no relevant information for a question is found in the notes, the value for the "answer" key for that question MUST be an empty string ("").
+    5. Your final output MUST be a single, valid JSON object with the exact same structure as the input questions object, but with the "answer" fields populated. Do not add, remove, or re-order any questions or categories.
+    """
+    return cortex_request(prompt)
 
 # ======================================================================================
 # Helper Functions for UI, State, and Exporting
@@ -316,6 +328,7 @@ if 'company_info' not in st.session_state: st.session_state.company_info = {}
 if 'company_summary' not in st.session_state: st.session_state.company_summary = ""
 if 'roadmap_df' not in st.session_state: st.session_state.roadmap_df = pd.DataFrame()
 if 'messages' not in st.session_state: st.session_state.messages = []
+if 'notes_content' not in st.session_state: st.session_state.notes_content = ""
 
 def move_question(category, index, direction):
     """Swaps a question with the one above or below it."""
@@ -350,7 +363,11 @@ def add_custom_question(category, text_input_key):
         st.session_state[text_input_key] = ""
 
 def clear_session():
-    keys_to_clear = ['questions', 'company_info', 'messages', 'company_summary', 'roadmap_df']
+    keys_to_clear = ['questions', 'company_info', 'messages', 'company_summary', 'roadmap_df', 'notes_content']
+    for key in list(st.session_state.keys()):
+        if key.startswith('toggle_'):
+             keys_to_clear.append(key)
+    
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
@@ -360,7 +377,12 @@ def clear_session():
 # Main App Logic
 # ======================================================================================
 
-tab1, tab2, tab3 = st.tabs(["**1. Account Research & Discovery**", "**2. Snowflake Solution Chatter**", "**3. Strategic Roadmap**"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "**Account Research & Discovery**", 
+    "**Freeform Notes & Auto-fill**",
+    "**Snowflake Solution Chat**", 
+    "**Roadmap Builder**"
+])
 
 with tab1:
     col_header1, col_header2 = st.columns([4, 1])
@@ -384,7 +406,7 @@ with tab1:
             index=persona_idx
         )
 
-        competitor_options = ["Databricks", "Microsoft Fabric", "AWS", "Do Nothing (i.e., keep existing technology)"]
+        competitor_options = ["Databricks", "Microsoft Fabric", "AWS", "GCP", "Do Nothing (i.e., keep existing technology)"]
         competitor_idx = competitor_options.index(st.session_state.company_info.get('competitor', 'Databricks')) if st.session_state.company_info.get('competitor') in competitor_options else 0
         competitor = st.selectbox(
             "**Select Primary Competitor**",
@@ -439,7 +461,6 @@ with tab1:
             st.header("Step 2: Ask Questions and Capture Responses")
             st.markdown(f"Discovery questions for **{st.session_state.company_info.get('website')}**")
 
-            # First, update all answers from the text areas into the session state list
             for cat, q_list in st.session_state.questions.items():
                  for q in q_list:
                       widget_key = f"ans_{q['id']}"
@@ -448,14 +469,13 @@ with tab1:
 
             for category, questions_list in st.session_state.questions.items():
                 if not questions_list: continue
-
-                # --- UPDATED: Use a stateful st.toggle to control visibility ---
-                # This ensures the open/closed state is preserved during reruns
+                
                 toggle_key = f"toggle_{category.replace(' ', '_')}"
+                # --- UPDATED: Use a stateful st.toggle instead of st.checkbox ---
                 is_expanded = st.toggle(
                     f"**{category}** ({len(questions_list)} questions)",
                     key=toggle_key,
-                    value=st.session_state.get(toggle_key, False) # Default to False (open)
+                    value=st.session_state.get(toggle_key, False) # Default to False (collapsed)
                 )
 
                 if is_expanded:
@@ -523,19 +543,52 @@ with tab1:
             with col2:
                 st.download_button("📥 Download as CSV", data=export_df.to_csv(index=False).encode('utf-8'), file_name=f"discovery_notes_{company_name}.csv", mime='text/csv', use_container_width=True)
             with col3:
-                if st.button("📋 Copy for Google Docs", use_container_width=True):
-                    gdocs_text = format_for_gdocs(export_df, st.session_state.company_info)
-                    st.text_area("Formatted Text", value=gdocs_text, height=300)
-                    st.info("Use Ctrl+C or Cmd+C to copy the text above.", icon="📋")
-            with col4:
                 if st.button("💾 Save to Snowflake", use_container_width=True):
                     with st.spinner("Saving to Snowflake..."):
                         if save_answers_to_snowflake(export_df):
                             st.success("Successfully saved responses to Snowflake!")
+            with col4:
+                if st.button("📋 Copy for Google Docs", use_container_width=True):
+                    gdocs_text = format_for_gdocs(export_df, st.session_state.company_info)
+                    st.text_area("Formatted Text", value=gdocs_text, height=300)
+                    st.info("Use Ctrl+C or Cmd+C to copy the text above.", icon="📋")
 
 with tab2:
-    st.header("Chat About Snowflake Solutions")
+    st.header("Freeform Notes & Auto-fill")
+    st.markdown("Take your meeting notes here. When you're done, the AI can read your notes and automatically fill out the answers on the first tab.")
 
+    if 'questions' not in st.session_state or not st.session_state.questions:
+        st.info("Please generate questions on the **'Account Research & Discovery'** tab before taking notes.")
+    else:
+        notes = st.text_area(
+            "Meeting Notes",
+            key='notes_content',
+            placeholder="Start typing your meeting notes here...",
+            height=400
+        )
+
+        if st.button("📝 Auto-fill Answers from Notes", type="primary"):
+            if notes:
+                with st.spinner("AI is reading your notes and filling out answers..."):
+                    populated_questions = autofill_answers_from_notes(notes, st.session_state.questions)
+                    
+                    if populated_questions:
+                        for category, questions in populated_questions.items():
+                            if category in st.session_state.questions:
+                                for question_data in questions:
+                                    for q_state in st.session_state.questions[category]:
+                                        if q_state['id'] == question_data['id']:
+                                            q_state['answer'] = question_data['answer']
+                                            break
+                        st.success("Auto-fill complete! Check the 'Account Research & Discovery' tab to see the results.")
+                    else:
+                        st.error("The AI could not process the notes to fill out the questions. Please try again.")
+            else:
+                st.warning("Please enter some notes before trying to auto-fill.")
+
+
+with tab3:
+    st.header("Chat About Snowflake Solutions")
     if not st.session_state.company_info:
         st.info("Please research an account on the first tab to activate the chat.")
     else:
@@ -558,13 +611,12 @@ with tab2:
 
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-with tab3:
-    st.header("Generate a Strategic Roadmap")
 
+with tab4:
+    st.header("Generate a Strategic Roadmap")
     if not st.session_state.questions:
-        st.info("Please complete the research on the **'1. Account Research & Discovery'** tab first.")
+        st.info("Please complete the research on the **'Account Research & Discovery'** tab first.")
     else:
-        # Sync answers from widgets before generating roadmap
         for category, questions_list in st.session_state.questions.items():
             for question in questions_list:
                 widget_key = f"ans_{question['id']}"
