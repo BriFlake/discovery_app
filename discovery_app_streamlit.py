@@ -7,8 +7,11 @@ import json
 from fpdf import FPDF
 from datetime import datetime
 import re
+from pptx import Presentation
+from pptx.util import Inches
+from io import BytesIO
 
-# USER ACTION: You may need to add 'fpdf' to your Streamlit in Snowflake environment.
+# USER ACTION: You may need to add 'fpdf' and 'python-pptx' to your Streamlit in Snowflake environment.
 
 
 # ======================================================================================
@@ -34,6 +37,10 @@ conn = st.connection("snowflake")
 
 def save_answers_to_snowflake(df):
     """Saves the captured discovery answers to a Snowflake table."""
+    if df.empty:
+        st.warning("No answered questions to save.")
+        return False
+        
     try:
         df_to_save = df.copy()
         df_to_save.columns = [col.upper() for col in df_to_save.columns]
@@ -47,30 +54,35 @@ def save_answers_to_snowflake(df):
 # LLM Functions powered by Snowflake Cortex (Claude 3-5 Sonnet)
 # ======================================================================================
 
-def cortex_request(prompt):
-    """Generic function to make a request to Cortex and parse the response."""
+def cortex_request(prompt, json_output=True):
+    """Generic function to make a request to Cortex."""
+    safe_prompt = prompt.replace("'", "''")
+    sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
+    
     try:
-        safe_prompt = prompt.replace("'", "''")
-        sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
-        
         cursor = conn.cursor()
         cursor.execute(sql_query)
         response_row = cursor.fetchone()
         
-        if response_row and response_row[0]:
-            llm_response_str = response_row[0]
-            json_start = llm_response_str.find('{')
-            json_end = llm_response_str.rfind('}') + 1
-            
-            if json_start != -1 and json_end != 0:
-                json_str = llm_response_str[json_start:json_end]
-                return json.loads(json_str)
-            else:
-                st.error("Could not find a valid JSON object in the LLM's response.")
-                return None
-        else:
-            st.error("The LLM returned an empty response.")
+        if not (response_row and response_row[0]):
+            st.error("The AI model returned an empty response.")
             return None
+
+        llm_response_str = response_row[0]
+        
+        if not json_output:
+            return llm_response_str
+
+        json_start = llm_response_str.find('{')
+        json_end = llm_response_str.rfind('}') + 1
+        
+        if json_start != -1 and json_end != 0:
+            json_str = llm_response_str[json_start:json_end]
+            return json.loads(json_str)
+        else:
+            st.error("Could not find a valid JSON object in the LLM's response.")
+            return None
+            
     except Exception as e:
         st.error(f"An error occurred while calling the LLM or parsing the response: {e}")
         return None
@@ -101,14 +113,7 @@ def generate_company_summary(website, industry, persona):
     You are a skilled business analyst. Based on the company website '{website}' and its industry '{industry}', provide a concise, one-paragraph summary relevant to a person with the title of **{persona}**.
     Touch upon the company's likely business model, its target customers, and potential data-related opportunities or challenges.
     """
-    safe_prompt = prompt.replace("'", "''")
-    sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
-    try:
-        response = conn.query(sql_query, show_spinner=False)
-        return response.iloc[0]['RESPONSE']
-    except Exception as e:
-        st.error(f"Error generating company summary: {e}")
-        return "An error occurred while generating the summary."
+    return cortex_request(prompt, json_output=False)
 
 def generate_more_questions_for_category(website, industry, competitor, persona, category, existing_questions):
     """Generates 5 more questions for a specific category."""
@@ -177,38 +182,82 @@ def get_chatbot_response(company_info, chat_history):
     {history_str}
     Based on all of this context, provide a concise and helpful answer to the last user question.
     """
-    safe_prompt = prompt.replace("'", "''")
-    sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
-    try:
-        response = conn.query(sql_query, show_spinner=False)
-        return response.iloc[0]['RESPONSE']
-    except Exception as e:
-        st.error(f"Error calling LLM: {e}")
-        return "There was an error communicating with the assistant."
+    return cortex_request(prompt, json_output=False)
 
 def autofill_answers_from_notes(notes_text, questions_dict):
     """Uses LLM to populate answers to questions based on freeform notes."""
     prompt = f"""
     You are an intelligent assistant. Your task is to populate answers to a list of discovery questions based on a provided block of freeform notes.
-
     **Source Notes:**
     ---
     {notes_text}
     ---
-
     **Questions to Answer (JSON format):**
     ---
     {json.dumps(questions_dict, indent=2)}
     ---
-
     **Instructions:**
     1. Read through the **Source Notes** carefully.
     2. For each question in the **Questions to Answer** JSON object, find the relevant information within the notes.
     3. Formulate a concise answer for each question based *only* on the information present in the notes.
-    4. If no relevant information for a question is found in the notes, the value for the "answer" key for that question MUST be an empty string ("").
-    5. Your final output MUST be a single, valid JSON object with the exact same structure as the input questions object, but with the "answer" fields populated. Do not add, remove, or re-order any questions or categories.
+    4. If no relevant information for a question is found, the value for the "answer" key MUST be an empty string ("").
+    5. Your final output MUST be a single, valid JSON object with the exact same structure as the input questions object, but with the "answer" fields populated.
     """
     return cortex_request(prompt)
+
+def generate_business_case(company_info, discovery_notes_str):
+    """Generates a business case and strategy from discovery notes."""
+    prompt = f"""
+    You are a senior business value consultant. Your task is to analyze the following discovery notes and build a compelling business case for adopting Snowflake.
+
+    **Customer Context:**
+    - Company: {company_info.get('website', 'N/A')}
+    - Industry: {company_info.get('industry', 'N/A')}
+    - Persona of Contact: {company_info.get('persona', 'N/A')}
+    - Main Competitor: {company_info.get('competitor', 'N/A')}
+
+    **Discovery Notes (Questions & Answers):**
+    ---
+    {discovery_notes_str}
+    ---
+
+    **Instructions:**
+    Based on the notes, generate a response with three sections:
+    1.  **Business Case:** Synthesize the notes into a business case. Use metrics and quantitative data from the answers where possible. Frame the value proposition around the key business initiatives discussed.
+    2.  **Key Questions for Value Metrics:** Identify and list 3-5 critical follow-up questions that need to be asked to uncover stronger, quantifiable business value metrics (e.g., "To quantify the cost savings, how many hours per week do your data engineers spend on manual pipeline maintenance?").
+    3.  **Recommended Strategy:** Suggest a high-level strategy to strengthen the business case and align with the customer's goals.
+    4.  **Cruch the Competition:** Create the strongest possible argument to convince a customer to choose Snowflake over the competition. 
+
+    Format your response in Markdown.
+    """
+    return cortex_request(prompt, json_output=False)
+
+def generate_competitive_argument(company_info, discovery_notes_str):
+    """Generates a 'steel man' argument for the competitor."""
+    prompt = f"""
+    You are a highly skilled, aggressive, and effective salesperson for **{company_info.get('competitor', 'the competitor')}**. 
+    Your goal is to build the strongest possible "steel man" argument to convince a customer to choose your solution over Snowflake.
+
+    **Customer Context:**
+    - Company: {company_info.get('website', 'N/A')}
+    - Industry: {company_info.get('industry', 'N/A')}
+    - Persona of Contact: {company_info.get('persona', 'N/A')}
+
+    **Your Competitor's Discovery Notes (Snowflake's perspective):**
+    ---
+    {discovery_notes_str}
+    ---
+
+    **Instructions:**
+    Based on the notes, create the best possible competitive strategy and argument for **{company_info.get('competitor', 'your company')}**.
+    1.  **Competitive Strategy:** What is your overall strategy to win this deal? How will you position your strengths against Snowflake's perceived weaknesses based on the customer's answers?
+    2.  **Key Talking Points:** What are the 3-5 most powerful talking points you will use? For each point, explain why it will resonate with the customer based on their specific needs and pains revealed in the notes.
+    3.  **How to Counter Snowflake:** How would you proactively counter Snowflake's main value propositions? What would you say to create fear, uncertainty, and doubt (FUD) about choosing Snowflake?
+
+    Give the best, most compelling argument possible. Be specific and tactical. Format the response in Markdown.
+    """
+    return cortex_request(prompt, json_output=False)
+
 
 # ======================================================================================
 # Helper Functions for UI, State, and Exporting
@@ -292,6 +341,42 @@ def create_roadmap_pdf_bytes(roadmap_df, company_info):
 
     return pdf.output(dest='S').encode('latin-1')
 
+def generate_powerpoint_bytes(company_info, business_case, competitive_analysis):
+    """Generates a PowerPoint presentation from the strategic content."""
+    prs = Presentation()
+    
+    title_slide_layout = prs.slide_layouts[0]
+    slide = prs.slides.add_slide(title_slide_layout)
+    title = slide.shapes.title
+    subtitle = slide.placeholders[1]
+    title.text = f"Strategic Business Case for {company_info.get('website', 'the Company')}"
+    
+    subtitle.text = f"Prepared for: {company_info.get('persona', 'Valued Stakeholder')}\nDate: {datetime.today().strftime('%B %d, %Y')}"
+
+    bullet_slide_layout = prs.slide_layouts[1]
+    slide = prs.slides.add_slide(bullet_slide_layout)
+    shapes = slide.shapes
+    title_shape = shapes.title
+    body_shape = shapes.placeholders[1]
+    title_shape.text = "Business Case & Recommended Strategy"
+    tf = body_shape.text_frame
+    tf.text = business_case if business_case else "Not generated."
+    
+    if competitive_analysis:
+        slide = prs.slides.add_slide(bullet_slide_layout)
+        shapes = slide.shapes
+        title_shape = shapes.title
+        body_shape = shapes.placeholders[1]
+        title_shape.text = f"Anticipating the {company_info.get('competitor', 'Competitor')} Argument"
+        tf = body_shape.text_frame
+        tf.text = competitive_analysis
+
+    ppt_stream = BytesIO()
+    prs.save(ppt_stream)
+    ppt_stream.seek(0)
+    return ppt_stream.getvalue()
+
+
 def format_for_gdocs(export_df, company_info):
     """Formats notes for Google Docs, respecting answered/unanswered sorting."""
     doc_text = [f"# Discovery Notes: {company_info.get('website')}\n"]
@@ -329,6 +414,8 @@ if 'company_summary' not in st.session_state: st.session_state.company_summary =
 if 'roadmap_df' not in st.session_state: st.session_state.roadmap_df = pd.DataFrame()
 if 'messages' not in st.session_state: st.session_state.messages = []
 if 'notes_content' not in st.session_state: st.session_state.notes_content = ""
+if 'value_strategy_content' not in st.session_state: st.session_state.value_strategy_content = ""
+if 'competitive_analysis_content' not in st.session_state: st.session_state.competitive_analysis_content = ""
 
 def move_question(category, index, direction):
     """Swaps a question with the one above or below it."""
@@ -363,7 +450,7 @@ def add_custom_question(category, text_input_key):
         st.session_state[text_input_key] = ""
 
 def clear_session():
-    keys_to_clear = ['questions', 'company_info', 'messages', 'company_summary', 'roadmap_df', 'notes_content']
+    keys_to_clear = ['questions', 'company_info', 'messages', 'company_summary', 'roadmap_df', 'notes_content', 'value_strategy_content', 'competitive_analysis_content']
     for key in list(st.session_state.keys()):
         if key.startswith('toggle_'):
              keys_to_clear.append(key)
@@ -377,11 +464,12 @@ def clear_session():
 # Main App Logic
 # ======================================================================================
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "**Account Research & Discovery**", 
-    "**Freeform Notes & Auto-fill**",
-    "**Snowflake Solution Chat**", 
-    "**Roadmap Builder**"
+    "**Meeting Scratchpad**",
+    "**Value & Strategy**",
+    "**Roadmap Builder**",
+    "**Snowflake Solution Chat**"
 ])
 
 with tab1:
@@ -471,11 +559,10 @@ with tab1:
                 if not questions_list: continue
                 
                 toggle_key = f"toggle_{category.replace(' ', '_')}"
-                # --- UPDATED: Use a stateful st.toggle instead of st.checkbox ---
                 is_expanded = st.toggle(
                     f"**{category}** ({len(questions_list)} questions)",
                     key=toggle_key,
-                    value=st.session_state.get(toggle_key, False) # Default to False (collapsed)
+                    value=st.session_state.get(toggle_key, False)
                 )
 
                 if is_expanded:
@@ -535,18 +622,22 @@ with tab1:
 
         if export_data:
             export_df = pd.DataFrame(export_data)
-
+            
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                pdf_bytes = create_notes_pdf_bytes(export_df, st.session_state.company_info)
-                st.download_button("📄 Generate PDF", data=pdf_bytes, file_name=f"discovery_notes_{company_name}.pdf", mime="application/pdf", use_container_width=True)
+                st.download_button("📄 Generate PDF", data=create_notes_pdf_bytes(export_df, st.session_state.company_info), file_name=f"discovery_notes_{company_name}.pdf", mime="application/pdf", use_container_width=True)
             with col2:
                 st.download_button("📥 Download as CSV", data=export_df.to_csv(index=False).encode('utf-8'), file_name=f"discovery_notes_{company_name}.csv", mime='text/csv', use_container_width=True)
             with col3:
-                if st.button("💾 Save to Snowflake", use_container_width=True):
-                    with st.spinner("Saving to Snowflake..."):
-                        if save_answers_to_snowflake(export_df):
-                            st.success("Successfully saved responses to Snowflake!")
+                # This button is now the only way to save to Snowflake.
+                if st.button("💾 Save to Snowflake", use_container_width=True, help="Saves all answered questions to Snowflake"):
+                    answered_df = export_df[export_df['answer'].str.strip() != ''].copy()
+                    if not answered_df.empty:
+                        with st.spinner("Saving answered questions..."):
+                            if save_answers_to_snowflake(answered_df):
+                                st.success("✅ Answers saved to Snowflake!")
+                    else:
+                        st.warning("No answered questions to save.")
             with col4:
                 if st.button("📋 Copy for Google Docs", use_container_width=True):
                     gdocs_text = format_for_gdocs(export_df, st.session_state.company_info)
@@ -558,7 +649,7 @@ with tab2:
     st.markdown("Take your meeting notes here. When you're done, the AI can read your notes and automatically fill out the answers on the first tab.")
 
     if 'questions' not in st.session_state or not st.session_state.questions:
-        st.info("Please generate questions on the **'Account Research & Discovery'** tab before taking notes.")
+        st.info("Please generate questions on the **'1. Account Research & Discovery'** tab before taking notes.")
     else:
         notes = st.text_area(
             "Meeting Notes",
@@ -588,34 +679,71 @@ with tab2:
 
 
 with tab3:
-    st.header("Chat About Snowflake Solutions")
-    if not st.session_state.company_info:
-        st.info("Please research an account on the first tab to activate the chat.")
+    st.header("Value & Strategy")
+    st.markdown("Generate a business case and a competitive analysis based on the discovery information you've gathered.")
+
+    if 'questions' not in st.session_state or not st.session_state.questions:
+        st.info("Please complete the research on the **'1. Account Research & Discovery'** tab first.")
     else:
-        st.markdown(f"Ask questions about how Snowflake can help **{st.session_state.company_info.get('website')}**.")
+        for category, questions_list in st.session_state.questions.items():
+            for question in questions_list:
+                widget_key = f"ans_{question['id']}"
+                if widget_key in st.session_state:
+                    question['answer'] = st.session_state[widget_key]
 
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+        notes_list = []
+        for category, questions_list in st.session_state.questions.items():
+            for q in questions_list:
+                answer = str(q.get('answer', '')).strip()
+                if answer:
+                    notes_list.append(f"Category: {category}\nQ: {q['text']}\nA: {answer}\n")
+        
+        discovery_notes_str = "\n".join(notes_list)
 
-        if prompt := st.chat_input("How can Snowflake help with their data challenges?"):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
+        if not discovery_notes_str:
+            st.warning("Please answer at least one question on the first tab to generate content.")
+        else:
+            if st.button("📈 Generate Business Case & Strategy", type="primary"):
+                with st.spinner("Building business case..."):
+                    business_case = generate_business_case(st.session_state.company_info, discovery_notes_str)
+                    st.session_state.value_strategy_content = business_case
+                    st.session_state.competitive_analysis_content = ""
 
-            with st.chat_message("assistant"):
-                message_placeholder = st.empty()
-                with st.spinner("Claude is thinking..."):
-                    full_response = get_chatbot_response(st.session_state.company_info, st.session_state.messages)
-                    message_placeholder.markdown(full_response)
+            if st.session_state.value_strategy_content:
+                st.markdown(st.session_state.value_strategy_content)
+                st.divider()
 
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
+                st.subheader("Competitive Battlecard")
+                if st.button(f"🛡️ Generate 'Steel Man' Argument for {st.session_state.company_info.get('competitor')}"):
+                     with st.spinner(f"Preparing counter-arguments for {st.session_state.company_info.get('competitor')}..."):
+                         competitive_arg = generate_competitive_argument(st.session_state.company_info, discovery_notes_str)
+                         st.session_state.competitive_analysis_content = competitive_arg
+                
+                if st.session_state.competitive_analysis_content:
+                    st.markdown(st.session_state.competitive_analysis_content)
+
+                st.divider()
+                st.subheader("Export Strategy")
+                
+                ppt_bytes = generate_powerpoint_bytes(
+                    st.session_state.company_info,
+                    st.session_state.value_strategy_content,
+                    st.session_state.competitive_analysis_content
+                )
+                
+                st.download_button(
+                    label="📊 Download as PowerPoint",
+                    data=ppt_bytes,
+                    file_name=f"Strategy_{st.session_state.company_info.get('website', 'export').replace('https://','').replace('www.','').split('.')[0]}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    use_container_width=True
+                )
 
 
 with tab4:
-    st.header("Generate a Strategic Roadmap")
+    st.header("Roadmap Builder")
     if not st.session_state.questions:
-        st.info("Please complete the research on the **'Account Research & Discovery'** tab first.")
+        st.info("Please complete the research on the **'1. Account Research & Discovery'** tab first.")
     else:
         for category, questions_list in st.session_state.questions.items():
             for question in questions_list:
@@ -678,3 +806,27 @@ with tab4:
                 mime="text/csv",
                 use_container_width=True
             )
+
+with tab5:
+    st.header("Snowflake Solution Chat")
+    if not st.session_state.company_info:
+        st.info("Please research an account on the first tab to activate the chat.")
+    else:
+        st.markdown(f"Ask questions about how Snowflake can help **{st.session_state.company_info.get('website')}**.")
+
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        if prompt := st.chat_input("How can Snowflake help with their data challenges?"):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                with st.spinner("Claude is thinking..."):
+                    full_response = get_chatbot_response(st.session_state.company_info, st.session_state.messages)
+                    message_placeholder.markdown(full_response)
+
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
