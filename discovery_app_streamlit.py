@@ -81,8 +81,14 @@ def cortex_request(prompt, json_output=True):
             return json.loads(json_str)
         else:
             st.error("Could not find a valid JSON object in the LLM's response.")
+            # For debugging, show the raw response if it's not valid JSON
+            st.text_area("LLM Raw Response", llm_response_str, height=200)
             return None
             
+    except json.JSONDecodeError as e:
+        st.error(f"Error decoding JSON from LLM response: {e}")
+        st.text_area("LLM Raw Response that failed parsing", llm_response_str, height=200)
+        return None
     except Exception as e:
         st.error(f"An error occurred while calling the LLM or parsing the response: {e}")
         return None
@@ -185,25 +191,52 @@ def get_chatbot_response(company_info, chat_history):
     return cortex_request(prompt, json_output=False)
 
 def autofill_answers_from_notes(notes_text, questions_dict):
-    """Uses LLM to populate answers to questions based on freeform notes."""
+    """Orchestrates the auto-fill process by calling the LLM for each category."""
+    populated_questions = {}
+    for category, questions in questions_dict.items():
+        if not questions:
+            continue
+        
+        st.write(f"Analyzing notes for category: **{category}**...")
+        # Get answers for the current category
+        answered_category = autofill_category_from_notes(notes_text, category, questions)
+        
+        if answered_category:
+            populated_questions[category] = answered_category
+        else:
+            # If the LLM fails for one category, retain the original questions for that category
+            populated_questions[category] = questions
+            st.warning(f"Could not auto-fill answers for category: {category}. Please review manually.")
+
+    return populated_questions
+
+
+def autofill_category_from_notes(notes_text, category, questions_in_category):
+    """Uses LLM to populate answers for a single category of questions based on freeform notes."""
     prompt = f"""
-    You are an intelligent assistant. Your task is to populate answers to a list of discovery questions based on a provided block of freeform notes.
+    You are an intelligent assistant. Your task is to populate answers for a single category of discovery questions based on a provided block of freeform notes.
+
     **Source Notes:**
     ---
     {notes_text}
     ---
-    **Questions to Answer (JSON format):**
+
+    **Questions for the '{category}' category to Answer (JSON format):**
     ---
-    {json.dumps(questions_dict, indent=2)}
+    {json.dumps(questions_in_category, indent=2)}
     ---
+
     **Instructions:**
     1. Read through the **Source Notes** carefully.
-    2. For each question in the **Questions to Answer** JSON object, find the relevant information within the notes.
+    2. For each question in the provided JSON object, find the relevant information within the notes.
     3. Formulate a concise answer for each question based *only* on the information present in the notes.
-    4. If no relevant information for a question is found, the value for the "answer" key MUST be an empty string ("").
-    5. Your final output MUST be a single, valid JSON object with the exact same structure as the input questions object, but with the "answer" fields populated.
+    4. If no relevant information for a question is found, the value for the "answer" key for that question MUST be an empty string ("").
+    5. Your final output MUST be a single, valid JSON object with a key named "answered_questions" that contains a list of the questions with their "answer" fields populated. The structure of each question object must be identical to the input.
     """
-    return cortex_request(prompt)
+    response = cortex_request(prompt)
+    if response and "answered_questions" in response:
+        return response["answered_questions"]
+    return None
 
 def generate_business_case(company_info, discovery_notes_str):
     """Generates a business case and strategy from discovery notes."""
@@ -224,9 +257,8 @@ def generate_business_case(company_info, discovery_notes_str):
     **Instructions:**
     Based on the notes, generate a response with three sections:
     1.  **Business Case:** Synthesize the notes into a business case. Use metrics and quantitative data from the answers where possible. Frame the value proposition around the key business initiatives discussed.
-    2.  **Key Questions for Value Metrics:** Identify and list 3-5 critical follow-up questions that need to be asked to uncover stronger, quantifiable business value metrics (e.g., "To quantify the cost savings, how many hours per week do your data engineers spend on manual pipeline maintenance?").
+    2.  **Key Questions for Value Metrics:** Identify and list 3-5 critical follow-up questions that need to be asked to uncover stronger, quantifiable business value metrics.
     3.  **Recommended Strategy:** Suggest a high-level strategy to strengthen the business case and align with the customer's goals.
-    4.  **Cruch the Competition:** Create the strongest possible argument to convince a customer to choose Snowflake over the competition. 
 
     Format your response in Markdown.
     """
@@ -250,9 +282,9 @@ def generate_competitive_argument(company_info, discovery_notes_str):
 
     **Instructions:**
     Based on the notes, create the best possible competitive strategy and argument for **{company_info.get('competitor', 'your company')}**.
-    1.  **Competitive Strategy:** What is your overall strategy to win this deal? How will you position your strengths against Snowflake's perceived weaknesses based on the customer's answers?
-    2.  **Key Talking Points:** What are the 3-5 most powerful talking points you will use? For each point, explain why it will resonate with the customer based on their specific needs and pains revealed in the notes.
-    3.  **How to Counter Snowflake:** How would you proactively counter Snowflake's main value propositions? What would you say to create fear, uncertainty, and doubt (FUD) about choosing Snowflake?
+    1.  **Competitive Strategy:** What is your overall strategy to win this deal?
+    2.  **Key Talking Points:** What are the 3-5 most powerful talking points you will use?
+    3.  **How to Counter Snowflake:** How would you proactively counter Snowflake's main value propositions?
 
     Give the best, most compelling argument possible. Be specific and tactical. Format the response in Markdown.
     """
@@ -434,7 +466,7 @@ def toggle_favorite(q_id):
 
 def delete_question(q_id):
     for category, questions_list in st.session_state.questions.items():
-        st.session_state.questions[category] = [q for q in questions_list if q['id'] != q_id]
+        st.session_state.questions[category] = [q for q in q_list if q['id'] != q_id]
 
 def add_custom_question(category, text_input_key):
     question_text = st.session_state[text_input_key]
@@ -466,7 +498,7 @@ def clear_session():
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "**Account Research & Discovery**", 
-    "**Meeting Scratchpad**",
+    "**Freeform Notes & Auto-fill**",
     "**Value & Strategy**",
     "**Roadmap Builder**",
     "**Snowflake Solution Chat**"
@@ -629,7 +661,6 @@ with tab1:
             with col2:
                 st.download_button("📥 Download as CSV", data=export_df.to_csv(index=False).encode('utf-8'), file_name=f"discovery_notes_{company_name}.csv", mime='text/csv', use_container_width=True)
             with col3:
-                # This button is now the only way to save to Snowflake.
                 if st.button("💾 Save to Snowflake", use_container_width=True, help="Saves all answered questions to Snowflake"):
                     answered_df = export_df[export_df['answer'].str.strip() != ''].copy()
                     if not answered_df.empty:
@@ -661,16 +692,11 @@ with tab2:
         if st.button("📝 Auto-fill Answers from Notes", type="primary"):
             if notes:
                 with st.spinner("AI is reading your notes and filling out answers..."):
+                    # The new, more reliable autofill process
                     populated_questions = autofill_answers_from_notes(notes, st.session_state.questions)
                     
                     if populated_questions:
-                        for category, questions in populated_questions.items():
-                            if category in st.session_state.questions:
-                                for question_data in questions:
-                                    for q_state in st.session_state.questions[category]:
-                                        if q_state['id'] == question_data['id']:
-                                            q_state['answer'] = question_data['answer']
-                                            break
+                        st.session_state.questions = populated_questions
                         st.success("Auto-fill complete! Check the 'Account Research & Discovery' tab to see the results.")
                     else:
                         st.error("The AI could not process the notes to fill out the questions. Please try again.")
@@ -707,7 +733,7 @@ with tab3:
                 with st.spinner("Building business case..."):
                     business_case = generate_business_case(st.session_state.company_info, discovery_notes_str)
                     st.session_state.value_strategy_content = business_case
-                    st.session_state.competitive_analysis_content = ""
+                    st.session_state.competitive_analysis_content = "" # Reset competitive analysis
 
             if st.session_state.value_strategy_content:
                 st.markdown(st.session_state.value_strategy_content)
