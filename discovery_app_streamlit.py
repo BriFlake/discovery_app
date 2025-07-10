@@ -11,6 +11,9 @@ from pptx import Presentation
 from pptx.util import Inches
 from io import BytesIO
 
+# NEW: Add imports for random number generation
+import random
+
 # USER ACTION: You may need to add 'fpdf' and 'python-pptx' to your Streamlit in Snowflake environment.
 
 # This block runs first to handle setting the newly created session ID
@@ -31,7 +34,7 @@ st.set_page_config(
 )
 
 st.title("❄️ Snowflake Sales Discovery Assistant")
-st.caption("An internal app for account research and discovery powered by Streamlit in Snowflake and Claude 3-5 Sonnet.")
+st.caption("An internal app for account research and discovery powered by Streamlit in Snowflake.")
 
 
 # ======================================================================================
@@ -62,7 +65,7 @@ def save_answers_to_snowflake(df):
     try:
         df_to_save = df.copy()
         df_to_save.columns = [col.upper() for col in df_to_save.columns]
-        conn.write_pandas(df_to_save, "SALES_DISCOVERY_ANSWERS_BETA")
+        conn.write_pandas(df_to_save, "SALES_DISCOVERY_ANSWERS")
         return True
     except Exception as e:
         st.error(f"Error saving to Snowflake: {e}")
@@ -71,13 +74,15 @@ def save_answers_to_snowflake(df):
 def get_next_session_version(session_name_prefix, user):
     """Gets the next version number for a session name for the current user."""
     # This query is safe as inputs are controlled internally
-    sql = f"SELECT MAX(REGEXP_SUBSTR(session_name, 'v(\\\\d+)$')) FROM SALES_DISCOVERY_SESSIONS WHERE session_name LIKE '{session_name_prefix}%' AND saved_by_user = '{user}'"
+    sql = f"SELECT MAX(REGEXP_SUBSTR(session_name, 'v(\\\\d+)')) FROM SALES_DISCOVERY_SESSIONS WHERE session_name LIKE '{session_name_prefix}%' AND saved_by_user = '{user}'"
     try:
         cursor = conn.cursor()
         cursor.execute(sql)
         result = cursor.fetchone()
         if result and result[0]:
-            return int(result[0]) + 1
+            version_str = result[0]
+            numeric_part = re.sub(r'\D', '', version_str)
+            return int(numeric_part) + 1
         return 1
     except Exception as e:
         st.error(f"Error getting next session version: {e}")
@@ -102,11 +107,12 @@ def save_session_to_snowflake(show_message=True):
         "saved_by_user": current_user,
         "value_strategy_content": st.session_state.get('value_strategy_content', ''),
         "competitive_analysis_content": st.session_state.get('competitive_analysis_content', ''),
-        "roadmap_json": roadmap_json
+        "roadmap_json": roadmap_json,
+        "selected_model": st.session_state.get('selected_model', 'claude-3-5-sonnet'),
+        "outreach_emails": st.session_state.get('outreach_emails', {})
     }
     session_state_json = json.dumps(session_state_data)
 
-    # If a session is already loaded, perform an UPDATE.
     if st.session_state.selected_session_id != "new":
         try:
             session_id = st.session_state.selected_session_id
@@ -125,13 +131,15 @@ def save_session_to_snowflake(show_message=True):
         except Exception as e:
             st.error(f"Failed to update session: {e}")
     
-    # Otherwise, perform an INSERT for a new session.
     else:
         company_name = st.session_state.company_info['website'].replace('https://','').replace('www.','').split('.')[0]
         date_str = datetime.now().strftime('%Y-%m-%d')
         session_name_prefix = f"{company_name}_{date_str}"
         version = get_next_session_version(session_name_prefix, current_user)
-        session_name = f"{session_name_prefix}"
+        
+        # MODIFIED: Append a random 3-digit number to the session name for uniqueness.
+        random_suffix = random.randint(100, 999)
+        session_name = f"{session_name_prefix}_v{version}_{random_suffix}"
         session_id = str(uuid.uuid4())
         
         sql = """
@@ -197,6 +205,8 @@ def load_selected_session(session_id):
             st.session_state.notes_content = session_data.get('notes_content', "")
             st.session_state.value_strategy_content = session_data.get('value_strategy_content', "")
             st.session_state.competitive_analysis_content = session_data.get('competitive_analysis_content', "")
+            st.session_state.selected_model = session_data.get('selected_model', 'claude-3-5-sonnet')
+            st.session_state.outreach_emails = session_data.get('outreach_emails', {})
             
             roadmap_json = session_data.get('roadmap_json')
             if roadmap_json:
@@ -233,8 +243,9 @@ def delete_session_from_snowflake(session_id):
 
 def cortex_request(prompt, json_output=True):
     """Generic function to make a request to Cortex."""
+    selected_model = st.session_state.get('selected_model', 'claude-3-5-sonnet')
     safe_prompt = prompt.replace("'", "''")
-    sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{safe_prompt}') as response;"
+    sql_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{selected_model}', '{safe_prompt}') as response;"
     
     try:
         cursor = conn.cursor()
@@ -255,7 +266,7 @@ def cortex_request(prompt, json_output=True):
         
         if json_start != -1 and json_end != 0:
             json_str = llm_response_str[json_start:json_end]
-            return json.loads(json_str)
+            return json.loads(json_str, strict=False)
         else:
             st.error("Could not find a valid JSON object in the LLM's response.")
             st.text_area("LLM Raw Response", llm_response_str, height=200)
@@ -269,9 +280,8 @@ def cortex_request(prompt, json_output=True):
         st.error(f"An error occurred while calling the LLM or parsing the response: {e}")
         return None
 
-# MODIFIED: This function now sorts the question categories to a fixed order.
 def generate_discovery_questions(website, industry, competitor, persona):
-    """Generates initial discovery questions."""
+    """Generates initial discovery questions and sorts them into a fixed order."""
     prompt = f"""
     You are an expert Snowflake sales engineer. Generate discovery questions for a potential customer with the title of **{persona}**.
     Company Information: Website: {website}, Industry: {industry}, Assumed Primary Competitor: {competitor}.
@@ -280,31 +290,27 @@ def generate_discovery_questions(website, industry, competitor, persona):
     """
     questions_dict = cortex_request(prompt)
     if questions_dict:
-        # First, process the LLM output into a standardized dictionary
         temp_processed = {}
         competitive_key_name = f"Competitive Positioning vs. {competitor}"
         for category, qs in questions_dict.items():
-            # Standardize the competitive key name, as the LLM might vary it slightly
             if "Competitive Positioning" in category:
                 temp_processed[competitive_key_name] = [
                     {"id": str(uuid.uuid4()), "text": q, "answer": "", "favorite": False} for q in qs
                 ]
             else:
-                # Use a title case for consistency
                 temp_processed[category.title()] = [
                     {"id": str(uuid.uuid4()), "text": q, "answer": "", "favorite": False} for q in qs
                 ]
         
-        # Now, create the final dictionary in the desired order
         ordered_questions = {}
-        # Define the explicit order
         category_order = ["Technical Discovery", "Business Discovery", competitive_key_name]
 
         for category in category_order:
-            if category in temp_processed:
+            if category.title() in temp_processed:
+                ordered_questions[category.title()] = temp_processed[category.title()]
+            elif category in temp_processed:
                 ordered_questions[category] = temp_processed[category]
         
-        # Add any unexpected categories generated by the LLM at the end to be safe
         for category, questions in temp_processed.items():
             if category not in ordered_questions:
                 ordered_questions[category] = questions
@@ -476,6 +482,63 @@ def generate_competitive_argument(company_info, discovery_notes_str):
     """
     return cortex_request(prompt, json_output=False)
 
+def generate_outreach_emails(company_info, discovery_notes_str, roadmap_df):
+    """Generates outreach emails based on the strategic roadmap and discovery notes."""
+    roadmap_str = roadmap_df.to_string() if not roadmap_df.empty else "No roadmap generated yet."
+    
+    prompt = f"""
+    You are an expert enterprise software salesperson. Your goal is to draft 3 distinct, succinct, and captivating outreach emails to a person with the title of **{company_info.get('persona')}** at the company visited at **{company_info.get('website')}**.
+
+    Use the following context to make the emails relevant and impactful:
+
+    **Customer's Key Initiatives & Pains (from discovery notes):**
+    ---
+    {discovery_notes_str}
+    ---
+
+    **Potential Snowflake Projects We've Identified:**
+    ---
+    {roadmap_str}
+    ---
+
+    **Instructions:**
+    1.  Draft three different versions of a follow-up email.
+    2.  Each email should be short (less than 150 words).
+    3.  Each email should reference a specific pain point from the discovery notes and tie it to a high-value or "quick win" (low-effort) project from the roadmap.
+    4.  The tone should be professional, helpful, and focused on generating the next meeting.
+    5.  Return the three email versions as a single, valid JSON object with keys "email_1", "email_2", and "email_3". Each key's value should be another JSON object containing "subject" and "body".
+    6.  IMPORTANT: The final output must be only the JSON object. All strings within the JSON, especially the 'body', must be properly formatted with special characters like newlines escaped as \\n.
+    """
+    return cortex_request(prompt)
+
+def regenerate_single_email(company_info, discovery_notes_str, roadmap_df, existing_emails, email_to_replace_key):
+    """Generates one new email, ensuring it's different from existing ones."""
+    other_emails_str = ""
+    for key, data in existing_emails.items():
+        if key != email_to_replace_key:
+            other_emails_str += f"Existing Draft ({key}):\nSubject: {data.get('subject')}\nBody: {data.get('body')}\n\n"
+    
+    roadmap_str = roadmap_df.to_string() if not roadmap_df.empty else "No roadmap generated yet."
+    
+    prompt = f"""
+    You are an expert salesperson. Redraft a single, captivating outreach email for a {company_info.get('persona')} at {company_info.get('website')}.
+
+    Here is the original context:
+    - Customer Pains: {discovery_notes_str}
+    - Proposed Projects: {roadmap_str}
+
+    Here are the other email drafts you have already written. DO NOT REPEAT OR REUSE the style or content from these existing drafts:
+    ---
+    {other_emails_str}
+    ---
+
+    INSTRUCTION:
+    Generate one new, completely distinct email version that is different from the existing drafts. It must be short and professional.
+    Return it as a single, valid JSON object with "subject" and "body" keys.
+    IMPORTANT: The final output must be only the JSON object. All strings within the JSON must be properly formatted with special characters like newlines escaped as \\n.
+    """
+    return cortex_request(prompt)
+
 
 # ======================================================================================
 # Helper Functions for UI, State, and Exporting
@@ -619,6 +682,8 @@ if 'value_strategy_content' not in st.session_state: st.session_state.value_stra
 if 'competitive_analysis_content' not in st.session_state: st.session_state.competitive_analysis_content = ""
 if 'session_loaded' not in st.session_state: st.session_state.session_loaded = False
 if 'selected_session_id' not in st.session_state: st.session_state.selected_session_id = "new"
+if 'selected_model' not in st.session_state: st.session_state.selected_model = 'claude-3-5-sonnet'
+if 'outreach_emails' not in st.session_state: st.session_state.outreach_emails = {}
 
 
 def move_question(category, index, direction):
@@ -659,12 +724,14 @@ def clear_session(preserve_loaded_session_id=False):
     """Clears the session state, with an option to preserve the loaded session ID."""
     loaded_session_id = st.session_state.get('selected_session_id') if preserve_loaded_session_id else "new"
     current_user = st.session_state.get('current_user')
+    selected_model = st.session_state.get('selected_model', 'claude-3-5-sonnet')
     
     keys_to_clear = list(st.session_state.keys())
     for key in keys_to_clear:
         del st.session_state[key]
         
     st.session_state.selected_session_id = loaded_session_id
+    st.session_state.selected_model = selected_model
     if current_user:
         st.session_state.current_user = current_user
 
@@ -720,19 +787,41 @@ if st.session_state.selected_session_id != "new":
     st.sidebar.button("🗑️ Delete Selected Session", use_container_width=True, on_click=delete_session_from_snowflake, args=(st.session_state.selected_session_id,))
 
 st.sidebar.divider()
+st.sidebar.subheader("LLM Configuration")
+st.sidebar.text("Models impact speed and detail" )
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "**1. Account Research & Discovery**", 
-    "**2. Freeform Notes & Auto-fill**",
-    "**3. Value & Strategy**",
-    "**4. Roadmap Builder**",
-    "**5. Snowflake Solution Chat**"
+model_options = [
+    'claude-3-5-sonnet',
+    'snowflake-arctic',
+    'reka-flash',
+    'llama3-70b',
+    'llama3-8b',
+    'openai-gpt-4.1',
+    'mistral-large',
+    'gemma-7b',
+    'reka-core'
+]
+st.sidebar.selectbox(
+    "Select the LLM to use:",
+    options=model_options,
+    key='selected_model'
+)
+
+st.sidebar.divider()
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "**Research & Discovery**", 
+    "**Scratchpad**",
+    "**Value & Strategy**",
+    "**Roadmap Builder**",
+    "**Solution Chat**",
+    "**Email Builder**"
 ])
 
 with tab1:
     col_header1, col_header2 = st.columns([4, 1])
     with col_header1:
-        st.header("Step 1: Research Account & Generate Questions")
+        st.header("Step 1: Company & Initiatives")
     with col_header2:
         if st.button("Clear & Restart Session", use_container_width=True, help="Clears all data and starts a fresh session."):
             clear_session()
@@ -762,7 +851,7 @@ with tab1:
         if not website or not industry:
             st.warning("Please provide both a website and an industry.")
         else:
-            with st.spinner("Researching company, generating questions, and saving session..."):
+            with st.spinner(f"Generating summary and questions with {st.session_state.selected_model}..."):
                 st.session_state.company_info = {'website': website, 'industry': industry, 'competitor': competitor, 'persona': persona}
                 st.session_state.company_summary = generate_company_summary(website, industry, persona)
                 all_questions = generate_discovery_questions(website, industry, competitor, persona)
@@ -820,18 +909,17 @@ with tab1:
                         st.text_input("Enter your question:", key=custom_q_key, placeholder="Type your custom question here...", label_visibility="collapsed")
                         st.button("Add Question", key=f"add_q_{category.replace(' ', '_')}", on_click=add_custom_question, args=(category, custom_q_key))
                         if st.button(f"Generate 5 More AI Questions", key=f"more_{category.replace(' ', '_')}", use_container_width=True):
-                            with st.spinner(f"Generating more questions for {category}..."):
+                            with st.spinner(f"Generating more questions with {st.session_state.get('selected_model', 'the AI')}..."):
                                 existing_q_texts = [q['text'] for q in questions_list]
                                 new_questions = generate_more_questions_for_category(st.session_state.company_info['website'], st.session_state.company_info['industry'], st.session_state.company_info['competitor'], st.session_state.company_info['persona'], category, existing_q_texts)
                                 if new_questions:
                                     st.session_state.questions[category].extend(new_questions)
-                                    st.rerun() 
                                 else:
                                     st.warning("Could not generate additional questions.")
             st.divider()
 
         st.header("Step 3: Export or Save Responses")
-        st.markdown("Once you have captured the answers, you can export them or save them directly to the `SALES_DISCOVERY_ANSWERS_BETA` table in Snowflake for broader analytics.")
+        st.markdown("Once you have captured the answers, you can export them or save them directly to the `SALES_DISCOVERY_ANSWERS` table in Snowflake for broader analytics.")
         export_data = []
         company_name = st.session_state.company_info.get('website', 'N/A').replace('https://','').replace('www.','').split('.')[0].capitalize()
         for category, questions_list in st.session_state.questions.items():
@@ -854,7 +942,7 @@ with tab1:
             with col2:
                 st.download_button("📥 Download as CSV", data=export_df.to_csv(index=False).encode('utf-8'), file_name=f"discovery_notes_{company_name}.csv", mime='text/csv', use_container_width=True)
             with col3:
-                if st.button("💾 Save to Answers Table", use_container_width=True, help="Saves all answered questions to the SALES_DISCOVERY_ANSWERS_BETA table"):
+                if st.button("💾 Save to Answers Table", use_container_width=True, help="Saves all answered questions to the SALES_DISCOVERY_ANSWERS table"):
                     answered_df = export_df[export_df['answer'].str.strip() != ''].copy()
                     if not answered_df.empty:
                         with st.spinner("Saving answered questions..."):
@@ -877,7 +965,7 @@ with tab2:
         notes = st.text_area("Meeting Notes", key='notes_content', placeholder="Start typing your meeting notes here...", height=400)
         if st.button("📝 Auto-fill Answers from Notes", type="primary"):
             if notes:
-                with st.spinner("AI is reading your notes and filling out answers..."):
+                with st.spinner(f"Analyzing notes with {st.session_state.get('selected_model', 'the AI')}..."):
                     populated_questions = autofill_answers_from_notes(notes, st.session_state.questions)
                     if populated_questions:
                         st.session_state.questions = populated_questions
@@ -905,7 +993,7 @@ with tab3:
             st.warning("Please answer at least one question on the first tab to generate content.")
         else:
             if st.button("📈 Generate Business Case & Strategy", type="primary"):
-                with st.spinner("Building business case..."):
+                with st.spinner(f"Building business case with {st.session_state.get('selected_model', 'the AI')}..."):
                     business_case = generate_business_case(st.session_state.company_info, discovery_notes_str)
                     st.session_state.value_strategy_content = business_case
                     st.session_state.competitive_analysis_content = ""
@@ -914,7 +1002,7 @@ with tab3:
                 st.divider()
                 st.subheader("Competitive Battlecard")
                 if st.button(f"🛡️ Generate 'Steel Man' Argument for {st.session_state.company_info.get('competitor')}"):
-                        with st.spinner(f"Preparing counter-arguments for {st.session_state.company_info.get('competitor')}..."):
+                        with st.spinner(f"Preparing counter-arguments with {st.session_state.get('selected_model', 'the AI')}..."):
                             competitive_arg = generate_competitive_argument(st.session_state.company_info, discovery_notes_str)
                             st.session_state.competitive_analysis_content = competitive_arg
                 if st.session_state.competitive_analysis_content:
@@ -943,7 +1031,7 @@ with tab4:
             st.markdown("Based on the captured discovery answers, generate a potential implementation plan.")
             priority = st.radio("**Prioritize roadmap by:**", ("Quick Wins (Lowest Effort First)", "Highest Business Value First"), horizontal=True)
             if st.button("🚀 Generate Strategic Roadmap", type="primary"):
-                with st.spinner("Claude is architecting the solution..."):
+                with st.spinner(f"Building the roadmap with {st.session_state.get('selected_model', 'the AI')}..."):
                     st.session_state.roadmap_df = generate_roadmap(st.session_state.company_info, discovery_notes_str, priority)
     if not st.session_state.roadmap_df.empty:
         st.divider()
@@ -974,7 +1062,74 @@ with tab5:
                 st.markdown(prompt)
             with st.chat_message("assistant"):
                 message_placeholder = st.empty()
-                with st.spinner("Claude is thinking..."):
+                with st.spinner(f"Thinking with {st.session_state.selected_model}..."):
                     full_response = get_chatbot_response(st.session_state.company_info, st.session_state.messages)
                     message_placeholder.markdown(full_response)
             st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+with tab6:
+    st.header("Outreach Email Generator")
+    if 'roadmap_df' not in st.session_state or st.session_state.roadmap_df.empty:
+        st.info("Please generate a roadmap on the **'Roadmap Builder'** tab first to enable email generation.")
+    else:
+        st.markdown("Draft personalized follow-up emails based on the discovery notes and the strategic roadmap.")
+        
+        # This callback function will handle the regeneration of a single email
+        def handle_regenerate(email_key_to_replace):
+            notes_list = []
+            for category, questions_list in st.session_state.questions.items():
+                for q in questions_list:
+                    answer = str(q.get('answer', '')).strip()
+                    if answer:
+                        notes_list.append(f"Category: {category}\nQ: {q['text']}\nA: {answer}\n")
+            discovery_notes_str = "\n".join(notes_list)
+            
+            with st.spinner(f"Re-generating email with {st.session_state.selected_model}..."):
+                new_email_data = regenerate_single_email(
+                    st.session_state.company_info, 
+                    discovery_notes_str, 
+                    st.session_state.roadmap_df, 
+                    st.session_state.outreach_emails, 
+                    email_key_to_replace
+                )
+                if new_email_data and "subject" in new_email_data and "body" in new_email_data:
+                    st.session_state.outreach_emails[email_key_to_replace] = new_email_data
+                else:
+                    st.warning("Could not re-generate the email. Please try again.")
+
+        if st.button("✉️ Draft Follow-up Emails", type="primary"):
+            notes_list = []
+            for category, questions_list in st.session_state.questions.items():
+                for q in questions_list:
+                    answer = str(q.get('answer', '')).strip()
+                    if answer:
+                        notes_list.append(f"Category: {category}\nQ: {q['text']}\nA: {answer}\n")
+            discovery_notes_str = "\n".join(notes_list)
+            
+            with st.spinner(f"Drafting emails with {st.session_state.selected_model}..."):
+                st.session_state.outreach_emails = generate_outreach_emails(st.session_state.company_info, discovery_notes_str, st.session_state.roadmap_df)
+
+        if st.session_state.outreach_emails:
+            st.divider()
+            for i, (email_key, email_data) in enumerate(st.session_state.outreach_emails.items()):
+                with st.expander(f"**Email Version {i+1}: {email_data.get('subject', '')}**", expanded=(i==0)):
+                    
+                    b_col1, b_col2 = st.columns([4, 1])
+                    with b_col1:
+                        st.markdown(f"##### Subject: {email_data.get('subject', 'No Subject')}")
+                    with b_col2:
+                        st.button("🔄 Re-generate", key=f"regen_{email_key}", on_click=handle_regenerate, args=(email_key,))
+
+                    st.markdown("---")
+                    # Display the email body with markdown for nice formatting
+                    st.markdown(email_data.get('body', 'Could not generate email body.').replace('\n', '<br>'), unsafe_allow_html=True)
+                    st.markdown("---")
+                    
+                    # Add the copyable text area
+                    full_email_text = f"Subject: {email_data.get('subject', '')}\n\n{email_data.get('body', '')}"
+                    st.text_area(
+                        "**Copyable Email Content**",
+                        full_email_text,
+                        height=200,
+                        key=f"copy_text_{email_key}"
+                    )
