@@ -879,7 +879,7 @@ if st.session_state.selected_session_id != "new":
 st.sidebar.divider()
 st.sidebar.subheader("LLM Configuration")
 st.sidebar.text("Models impact speed and detail")
-model_options = ['claude-3-5-sonnet', 'snowflake-arctic', 'reka-flash', 'reka-core', 'llama3-70b', 'llama3-8b', 'mistral-large', 'gemma-7b']
+model_options = ['claude-3-5-sonnet', 'reka-flash', 'reka-core', 'llama3-70b', 'llama3-8b', 'mistral-large', 'gemma-7b']
 st.sidebar.selectbox("Select the LLM to use:", options=model_options, key='selected_model', label_visibility="collapsed")
 st.sidebar.divider()
 
