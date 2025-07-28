@@ -1,0 +1,7 @@
+streamlit
+plotly
+pandas
+snowflake-connector-python
+requests
+llm-wrapper
+streamlit-mermaid 

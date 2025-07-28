@@ -1,0 +1,1036 @@
+# Sales Activities Page
+# Complete sales discovery workflow
+
+import streamlit as st
+import pandas as pd
+import uuid
+from modules.ui_components import render_navigation_sidebar
+from modules.llm_functions import (generate_discovery_questions, generate_company_summary, generate_initiative_questions,
+                                 generate_business_case, generate_roadmap, generate_competitive_argument, 
+                                 generate_initial_value_hypothesis, generate_outreach_emails, generate_linkedin_messages)
+from modules.sales_functions import prepare_discovery_notes
+
+st.set_page_config(
+    page_title="Sales Activities", 
+    page_icon="🏢",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+# Mark app as fully loaded for database queries
+from modules.snowflake_utils import mark_app_loaded
+mark_app_loaded()
+
+# Check if there's a session to load from homepage
+if 'session_to_load' in st.session_state:
+    session_id = st.session_state.session_to_load
+    session_name = st.session_state.get('session_name_to_load', 'Unknown Session')
+    
+    # Clear the flags
+    del st.session_state.session_to_load
+    if 'session_name_to_load' in st.session_state:
+        del st.session_state.session_name_to_load
+    
+    # Load the session data
+    with st.spinner(f"📂 Loading session: {session_name}..."):
+        from modules.session_management import load_session_data
+        if load_session_data(session_id):
+            # Add a brief loading message for questions processing
+            with st.spinner("📋 Restoring discovery questions and answers..."):
+                import time
+                time.sleep(0.5)  # Brief pause to show the loading message
+            st.success(f"✅ Successfully loaded: {session_name}")
+            st.rerun()
+        else:
+            st.error(f"❌ Failed to load session: {session_name}")
+
+# Render sidebar
+render_navigation_sidebar()
+
+st.title("🏢 Sales Activities")
+st.markdown("**Complete sales discovery workflow**")
+
+# Get questions from session state for use across all tabs
+questions = st.session_state.get('questions', [])
+
+# Main workflow tabs at the top
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🔍 Discovery", 
+    "📈 Value & Strategy", 
+    "📧 Outreach", 
+    "👥 People Research"
+])
+
+with tab1:
+    # Discovery tab content - reorganized with collapsible sections
+    
+    # Start New Session - Above everything else
+    st.markdown("### 🆕 Start New Session")
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        if st.button("🆕 Start New Session", use_container_width=True, help="Save current work and start fresh", key="start_new_main"):
+            try:
+                from modules.session_management import start_new_session
+                start_new_session()
+            except ImportError as e:
+                # Fallback implementation if import fails
+                try:
+                    from modules.session_management import clear_session_data, save_current_session
+                    
+                    # Check if there's data to save
+                    has_company_data = bool(st.session_state.get('company_info', {}).get('website'))
+                    has_questions = bool(st.session_state.get('questions'))
+                    
+                    if has_company_data or has_questions:
+                        try:
+                            save_current_session()
+                            st.success("✅ Current session saved successfully!")
+                        except Exception as save_error:
+                            st.warning(f"⚠️ Could not save current session: {save_error}")
+                    
+                    # Clear session data using helper function
+                    clear_session_data()
+                    st.info("🆕 Started fresh discovery session!")
+                    st.rerun()
+                    
+                except ImportError:
+                    # Ultimate fallback - manual clear
+                    session_keys_to_clear = [
+                        'questions', 'company_info', 'selected_sf_account', 'current_session_id',
+                        'company_summary_data', 'roadmap', 'roadmap_df', 'competitive_strategy',
+                        'outreach_content', 'people_research', 'business_case', 'initial_value_hypothesis',
+                        'outreach_emails', 'linkedin_messages'
+                    ]
+                    for key in session_keys_to_clear:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.info("🆕 Started fresh discovery session!")
+                    st.rerun()
+                
+            except Exception as e:
+                st.error(f"❌ Error starting new session: {e}")
+    with col2:
+        st.caption("💡 This will save your current session and start fresh")
+    
+    st.markdown("---")
+    
+    # 1. SAVED SESSIONS - Enhanced with Normalized Schema
+    with st.expander("📂 **Saved Sessions**", expanded=True):
+        st.markdown("**Continue your previous discovery sessions**")
+        
+        try:
+            # Import the new normalized session management
+            from modules.session_management_v2 import get_saved_sessions, load_session_data
+            
+            sessions_df = get_saved_sessions()
+            
+            if not sessions_df.empty:
+                # Enhanced session cards with rich information
+                for idx, session in sessions_df.iterrows():
+                    
+                    # Create a professional session card
+                    with st.container():
+                        col1, col2, col3, col4 = st.columns([4, 2, 2, 1])
+                        
+                        with col1:
+                            # Session name and company info
+                            st.markdown(f"**{session['SESSION_NAME']}**")
+                            company_name = session.get('COMPANY_NAME', 'Unknown Company')
+                            
+                            # Rich context display
+                            context_parts = [f"🏢 {company_name}"]
+                            
+                            if session.get('CONTACT_NAME'):
+                                context_parts.append(f"👤 {session['CONTACT_NAME']}")
+                            
+                            if session.get('COMPETITOR'):
+                                context_parts.append(f"🔄 vs {session['COMPETITOR']}")
+                            
+                            st.caption(" • ".join(context_parts))
+                        
+                        with col2:
+                            # Progress with visual indicators
+                            completion = session.get('COMPLETION_PERCENTAGE', 0)
+                            answered = session.get('ANSWERS_COUNT', 0)
+                            total = session.get('TOTAL_QUESTIONS', 0)
+                            
+                            if total > 0:
+                                # Color-coded progress indicators
+                                if completion >= 80:
+                                    progress_color = "🟢"
+                                    status_text = "Complete"
+                                elif completion >= 50:
+                                    progress_color = "🟡"
+                                    status_text = "In Progress"
+                                elif completion >= 20:
+                                    progress_color = "🟠"
+                                    status_text = "Started"
+                                else:
+                                    progress_color = "🔴"
+                                    status_text = "Early"
+                                
+                                st.markdown(f"{progress_color} **{completion:.0f}%** ({status_text})")
+                                st.caption(f"📋 {answered}/{total} questions answered")
+                            else:
+                                st.caption("📋 No questions yet")
+                                st.caption("🆕 Fresh session")
+                        
+                        with col3:
+                            # Strategic content indicators
+                            content_items = session.get('CONTENT_ITEMS', [])
+                            contacts_count = session.get('CONTACTS_COUNT', 0)
+                            
+                            if content_items or contacts_count > 0:
+                                st.markdown("**Content Available:**")
+                                
+                                # Show first 2 content types
+                                if content_items:
+                                    display_items = content_items[:2]
+                                    st.caption(" • ".join(display_items))
+                                    
+                                    if len(content_items) > 2:
+                                        st.caption(f"+ {len(content_items) - 2} more items")
+                                
+                                # Show contacts count
+                                if contacts_count > 0:
+                                    st.caption(f"👥 {contacts_count} contact{'s' if contacts_count > 1 else ''}")
+                            else:
+                                st.caption("💡 Discovery questions only")
+                                st.caption("Ready for strategic content")
+                        
+                        with col4:
+                            # Enhanced load button
+                            button_help = f"Load {session['SESSION_NAME']}"
+                            if completion > 0:
+                                button_help += f" ({completion:.0f}% complete)"
+                            
+                            if st.button("📂", key=f"load_discovery_{session['SESSION_ID']}", 
+                                       help=button_help, use_container_width=True):
+                                # Set loading state
+                                st.session_state.session_to_load = session['SESSION_ID']
+                                st.session_state.session_name_to_load = session['SESSION_NAME']
+                                st.rerun()
+                        
+                        # Subtle visual separator
+                        st.markdown("---")
+                
+                # Summary statistics for multiple sessions
+                if len(sessions_df) > 1:
+                    total_sessions = len(sessions_df)
+                    avg_completion = sessions_df['COMPLETION_PERCENTAGE'].mean()
+                    total_content = sessions_df['CONTENT_COUNT'].sum()
+                    unique_companies = sessions_df['COMPANY_NAME'].nunique()
+                    
+                    st.markdown("### 📊 Your Discovery Portfolio")
+                    
+                    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+                    
+                    with metric_col1:
+                        st.metric("Sessions", total_sessions)
+                    
+                    with metric_col2:
+                        st.metric("Avg Progress", f"{avg_completion:.0f}%")
+                    
+                    with metric_col3:
+                        st.metric("Content Items", int(total_content))
+                    
+                    with metric_col4:
+                        st.metric("Companies", unique_companies)
+                    
+            else:
+                # Enhanced empty state
+                st.info("💡 **No saved sessions yet.** Complete a discovery session to see your history here.")
+                st.markdown("""
+                **What you'll see here:**
+                - 📊 **Progress tracking** for each session
+                - 🏢 **Company context** and contact information  
+                - 📋 **Question completion** statistics
+                - 💼 **Strategic content** indicators
+                - ⚡ **One-click loading** of previous work
+                """)
+
+        except Exception as e:
+            st.error(f"❌ Session management error: {e}")
+            st.info("💡 Please try refreshing the page or contact support if the issue persists.")
+            
+            # Fallback to old system if new one fails
+            try:
+                st.markdown("*Attempting fallback to legacy session system...*")
+                from modules.session_management import get_saved_sessions as get_legacy_sessions
+                legacy_sessions = get_legacy_sessions()
+                
+                if not legacy_sessions.empty:
+                    st.warning("⚠️ Using legacy session system. Some features may be limited.")
+                    for idx, session in legacy_sessions.head(3).iterrows():
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.markdown(f"**{session.get('SESSION_NAME', 'Unknown Session')}**")
+                        with col2:
+                            if st.button("📂 Load", key=f"legacy_load_{idx}"):
+                                st.info("Please migrate to the new system for full functionality.")
+                else:
+                    st.info("No legacy sessions found either.")
+                    
+            except:
+                st.error("❌ Both new and legacy session systems unavailable.")
+    
+    # Show currently loaded session indicator
+    current_session_id = st.session_state.get('current_session_id')
+    if current_session_id:
+        company_info = st.session_state.get('company_info', {})
+        company_name = company_info.get('name') or company_info.get('account_name') or company_info.get('website', 'Unknown')
+        st.success(f"✅ **Currently Active:** {company_name} session")
+        
+        # Quick session actions
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("💾 Save Progress", help="Save current work", use_container_width=True):
+                from modules.session_management_v2 import save_current_session
+                save_current_session()
+    
+    # 2. SMART SALESFORCE SEARCH - Collapsible
+    with st.expander("🔍 **Smart Salesforce Account Search**", expanded=False):
+        st.markdown("Search for companies in your Salesforce database")
+        
+        search_col1, search_col2 = st.columns([3, 1])
+        
+        with search_col1:
+            search_query = st.text_input(
+                "🏢 Search Salesforce Accounts", 
+                placeholder="Enter company name...",
+                help="Search by company name to find Salesforce account data"
+            )
+        
+        with search_col2:
+            search_limit = st.selectbox("Results", [10, 20, 50, 100], index=1)
+        
+        # Search tips in a simple info box
+        st.info("""
+        💡 **Search Tips:** Use partial company names (e.g., "Microsoft" vs "Microsoft Corporation"). 
+        Try different variations if no results. Returns Industry, City, Type, and Employee data.
+        """)
+        
+        # Live search when query is entered
+        if search_query and len(search_query) >= 2:
+            try:
+                from modules.snowflake_utils import search_salesforce_accounts_live
+            except ImportError:
+                # Inline fallback definition - enhanced with more fields
+                def search_salesforce_accounts_live(search_term, limit=20):
+                    from modules.snowflake_utils import execute_query
+                    query = """
+                    SELECT 
+                        ID as ACCOUNT_ID,
+                        NAME as ACCOUNT_NAME,
+                        WEBSITE,
+                        INDUSTRY,
+                        BILLING_CITY,
+                        TYPE,
+                        NUMBER_OF_EMPLOYEES
+                    FROM FIVETRAN.SALESFORCE.ACCOUNT
+                    WHERE IS_DELETED = FALSE
+                    AND UPPER(NAME) LIKE UPPER(?)
+                    ORDER BY NAME ASC
+                    LIMIT ?
+                    """
+                    return execute_query(query, params=(f"%{search_term}%", limit))
+            
+            with st.spinner(f"🔍 Searching Salesforce for '{search_query}'..."):
+                search_results = search_salesforce_accounts_live(search_query, search_limit)
+            
+            if not search_results.empty:
+                st.success(f"✅ Found {len(search_results)} accounts")
+                st.markdown("#### 📋 Select an Account")
+                
+                # Display comprehensive account information
+                display_df = search_results.copy()
+                
+                # Show all requested fields in the table
+                display_columns = {
+                    "ACCOUNT_NAME": st.column_config.TextColumn("Company Name", width="medium"),
+                    "INDUSTRY": st.column_config.TextColumn("Industry", width="medium"),
+                    "BILLING_CITY": st.column_config.TextColumn("City", width="small"),
+                    "TYPE": st.column_config.TextColumn("Type", width="small"),
+                    "NUMBER_OF_EMPLOYEES": st.column_config.NumberColumn("Employees", width="small"),
+                }
+                
+                # Create the interactive table with all fields
+                selected_row = st.dataframe(
+                    display_df[["ACCOUNT_NAME", "INDUSTRY", "BILLING_CITY", "TYPE", "NUMBER_OF_EMPLOYEES"]],
+                    column_config=display_columns,
+                    hide_index=True,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="single-row"
+                )
+                
+                # Check if any row is selected
+                if selected_row['selection']['rows']:
+                    # Get the selected account
+                    selected_index = selected_row['selection']['rows'][0]
+                    selected_account = search_results.iloc[selected_index]
+                    
+                    # Show detailed account information
+                    st.markdown("#### 📊 Selected Account Details")
+                    
+                    # Comprehensive account details
+                    company_name = selected_account.get('ACCOUNT_NAME', 'N/A')
+                    website = selected_account.get('WEBSITE', 'N/A')
+                    industry = selected_account.get('INDUSTRY', 'N/A')
+                    city = selected_account.get('BILLING_CITY', 'N/A')
+                    account_type = selected_account.get('TYPE', 'N/A')
+                    employees = selected_account.get('NUMBER_OF_EMPLOYEES', 'N/A')
+                    account_id = selected_account.get('ACCOUNT_ID', 'N/A')
+                    
+                    # Comprehensive info display
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.info(f"**Company:** {company_name}")
+                        st.info(f"**Industry:** {industry}")
+                        st.info(f"**Website:** {website}")
+                    with col2:
+                        st.info(f"**City:** {city}")
+                        st.info(f"**Type:** {account_type}")
+                        st.info(f"**Employees:** {employees}")
+                    
+                    # Store selected account in session state
+                    st.session_state.selected_sf_account = selected_account
+                    
+                    # Discovery setup form
+                    st.markdown("#### 🎯 Discovery Setup")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        contact_name = st.text_input("👤 Contact Name", placeholder="John Smith", key="sf_contact_name")
+                        competitor = st.text_input("🏆 Primary Competitor", placeholder="Main competitor (optional)", key="sf_competitor")
+                    with col2:
+                        contact_title = st.text_input("💼 Contact Title", placeholder="VP of Engineering", key="sf_contact_title")
+                    
+                    if st.button("🚀 Start Discovery", use_container_width=True, type="primary", key="sf_start_discovery"):
+                        if contact_title:
+                            # Store comprehensive company info from Salesforce
+                            company_data = {
+                                'website': selected_account.get('WEBSITE', ''),
+                                'industry': selected_account.get('INDUSTRY', ''),
+                                'contact_name': contact_name,
+                                'contact_title': contact_title,
+                                'competitor': competitor,
+                                'account_name': selected_account.get('ACCOUNT_NAME', ''),
+                                'account_id': selected_account.get('ACCOUNT_ID', ''),
+                                'billing_city': selected_account.get('BILLING_CITY', ''),
+                                'account_type': selected_account.get('TYPE', ''),
+                                'employee_count': selected_account.get('NUMBER_OF_EMPLOYEES', '')
+                            }
+                            
+                            # Auto-generate company summary and discovery questions
+                            with st.spinner("🔍 Analyzing company and generating discovery questions..."):
+                                summary_data = generate_company_summary(
+                                    company_data.get('website', ''), 
+                                    company_data.get('industry', ''), 
+                                    company_data.get('contact_title', '')
+                                )
+                                questions = generate_discovery_questions(
+                                    company_data.get('website', ''),
+                                    company_data.get('industry', ''),
+                                    company_data.get('competitor', ''),
+                                    company_data.get('contact_title', '')
+                                )
+                                st.session_state.company_info = company_data
+                                st.session_state.company_summary_data = summary_data
+                                st.session_state.questions = questions
+                            
+                            if 'selected_sf_account' in st.session_state:
+                                del st.session_state.selected_sf_account
+                            st.success("✅ Account loaded! Discovery questions generated.")
+                            st.rerun()
+                        else:
+                            st.error("❌ Please enter the contact title to proceed")
+                else:
+                    st.info("👆 Click on a row in the table above to select a company")
+            
+            elif len(search_query) >= 2:
+                st.warning(f"❌ No accounts found for '{search_query}'. Try a different search term.")
+        
+        elif len(search_query) == 1:
+            st.info("💡 Enter at least 2 characters to search")
+    
+    # 3. MANUAL COMPANY SETUP - Collapsible
+    with st.expander("🏢 **Manual Company Setup**", expanded=False):
+        st.markdown("Enter company information manually if not found in Salesforce")
+        
+        with st.form("company_form"):
+            st.markdown("#### Manual Company Setup")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                website = st.text_input("🌐 Company Website", placeholder="company.com")
+                industry = st.text_input("🏭 Industry", placeholder="Technology, Healthcare, etc.")
+            
+            with col2:
+                contact_name = st.text_input("👤 Contact Name", placeholder="John Smith")
+                contact_title = st.text_input("💼 Contact Title", placeholder="VP of Engineering")
+            
+            competitor = st.text_input("🏆 Primary Competitor", placeholder="Main competitor (optional)")
+            
+            submitted = st.form_submit_button("🚀 Start Discovery", use_container_width=True, type="primary")
+            
+            if submitted:
+                if website and industry and contact_title:
+                    # Store company info
+                    company_data = {
+                        'website': website.strip(),
+                        'industry': industry.strip(),
+                        'contact_name': contact_name.strip() if contact_name else '',
+                        'contact_title': contact_title.strip(),
+                        'competitor': competitor.strip() if competitor else ''
+                    }
+                    
+                    # Auto-generate company summary and discovery questions
+                    with st.spinner("🔍 Analyzing company and generating discovery questions..."):
+                        # Generate enhanced company overview with initiatives
+                        summary_data = generate_company_summary(
+                            website.strip(), 
+                            industry.strip(), 
+                            contact_title.strip()
+                        )
+                        
+                        # Generate targeted discovery questions
+                        questions = generate_discovery_questions(
+                            website.strip(),
+                            industry.strip(),
+                            competitor.strip() if competitor else '',
+                            contact_title.strip()
+                        )
+                        
+                        st.session_state.company_info = company_data
+                        st.session_state.company_summary_data = summary_data
+                        st.session_state.questions = questions
+                    
+                    st.success("✅ Company research complete! Discovery questions generated.")
+                    st.rerun()
+                else:
+                    st.error("❌ Please fill in Company Website, Industry, and Contact Title")
+
+    # Company Overview & Key Initiatives Section (LLM-Generated)
+    if 'company_summary_data' in st.session_state and st.session_state.company_summary_data:
+        st.markdown("---")
+        st.markdown("### 🏢 Company Overview & Key Initiatives")
+        
+        summary_data = st.session_state.company_summary_data
+        company_info = st.session_state.get('company_info', {})
+        
+        with st.container(border=True):
+            st.markdown("#### 📋 Company Analysis")
+            if isinstance(summary_data, dict) and 'company_overview' in summary_data:
+                st.markdown(summary_data['company_overview'])
+            
+            if isinstance(summary_data, dict) and 'suggested_initiatives' in summary_data:
+                st.markdown("#### 💡 Suggested Key Initiatives")
+                initiatives = summary_data['suggested_initiatives']
+                if isinstance(initiatives, list):
+                    for i, initiative in enumerate(initiatives):
+                        if isinstance(initiative, dict):
+                            with st.container(border=True):
+                                st.markdown(f"**🎯 {initiative.get('title', 'Initiative')}**")
+                                st.markdown(f"**Description:** {initiative.get('description', 'N/A')}")
+                                st.markdown(f"**Relevance:** {initiative.get('relevance', 'N/A')}")
+                                
+                                if st.button(f"📝 Generate 5 Discovery Questions", key=f"gen_questions_{i}"):
+                                    with st.spinner(f"Generating questions for {initiative.get('title')}..."):
+                                        initiative_questions = generate_initiative_questions(
+                                            company_info.get('website', ''),
+                                            company_info.get('industry', ''),
+                                            company_info.get('contact_title', ''),
+                                            initiative.get('title', ''),
+                                            initiative.get('description', '')
+                                        )
+                                        if initiative_questions:
+                                            current_questions = st.session_state.get('questions', [])
+                                            formatted_questions = []
+                                            for q in initiative_questions:
+                                                formatted_questions.append({
+                                                    'id': str(uuid.uuid4()),
+                                                    'text': q.get('text', ''),
+                                                    'explanation': q.get('context', 'Initiative-specific question'),
+                                                    'answer': '',
+                                                    'importance': q.get('importance', 'medium'),
+                                                    'category': 'Initiative'
+                                                })
+                                            if not isinstance(current_questions, list):
+                                                current_questions = []
+                                            current_questions.extend(formatted_questions)
+                                            st.session_state.questions = current_questions
+                                            st.success(f"✅ Added 5 questions for {initiative.get('title')}")
+                                            st.rerun()
+                                        else:
+                                            st.error("❌ Failed to generate questions. Please try again.")
+            
+            # Manual Initiative Addition
+            st.markdown("#### ➕ Add Custom Initiative")
+            with st.form("add_initiative"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    custom_initiative_title = st.text_input("Initiative Title", placeholder="Digital Transformation")
+                with col2:
+                    custom_initiative_desc = st.text_input("Description", placeholder="Brief description of the initiative")
+                
+                if st.form_submit_button("🔥 Generate Questions for Custom Initiative"):
+                    if custom_initiative_title and custom_initiative_desc:
+                        with st.spinner(f"Generating questions for {custom_initiative_title}..."):
+                            initiative_questions = generate_initiative_questions(
+                                company_info.get('website', ''),
+                                company_info.get('industry', ''),
+                                company_info.get('contact_title', ''),
+                                custom_initiative_title,
+                                custom_initiative_desc
+                            )
+                            if initiative_questions:
+                                current_questions = st.session_state.get('questions', [])
+                                formatted_questions = []
+                                for q in initiative_questions:
+                                    formatted_questions.append({
+                                        'id': str(uuid.uuid4()),
+                                        'text': q.get('text', ''),
+                                        'explanation': q.get('context', 'Custom initiative question'),
+                                        'answer': '',
+                                        'importance': q.get('importance', 'medium'),
+                                        'category': 'Custom Initiative'
+                                    })
+                                if not isinstance(current_questions, list):
+                                    current_questions = []
+                                current_questions.extend(formatted_questions)
+                                st.session_state.questions = current_questions
+                                st.success(f"✅ Added 5 questions for {custom_initiative_title}")
+                                st.rerun()
+                            else:
+                                st.error("❌ Failed to generate questions. Please try again.")
+                    else:
+                        st.error("❌ Please fill in both title and description")
+
+    # Discovery Questions Section
+    st.markdown("---")
+    
+    # Calculate progress across all questions
+    if 'questions' in st.session_state and st.session_state.questions:
+        questions = st.session_state.questions
+        if isinstance(questions, list):
+            total_questions = len(questions)
+            answered_questions = len([q for q in questions if isinstance(q, dict) and q.get('answer', '').strip()])
+        else:
+            total_questions = sum(len(cat_questions) for cat_questions in questions.values())
+            answered_questions = sum(
+                len([q for q in cat_questions if q.get('answer', '').strip()])
+                for cat_questions in questions.values()
+            )
+        
+        st.markdown(f"### 🔍 Discovery Questions ({answered_questions}/{total_questions})")
+    else:
+        st.markdown("### 🔍 Discovery Questions")
+    
+
+    
+    # Auto-fill from notes section (outside of any expander context to avoid nesting)
+    if 'questions' in st.session_state and st.session_state.questions:
+        st.markdown("#### 📝 Auto-fill from Notes")
+        st.markdown("Paste your call notes, research, or any text to automatically populate answers")
+        
+        notes_content = st.text_area(
+            "📋 Paste your notes here:",
+            value="",
+            height=120,
+            placeholder="Paste notes from your call, email, or research here...",
+            key="notes_for_autofill"
+        )
+        
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("🤖 Auto-fill Answers", key="autofill_btn"):
+                if notes_content.strip():
+                    with st.spinner("🤖 Analyzing notes and auto-filling answers..."):
+                        from modules.llm_functions import autofill_answers_from_notes
+                        
+                        # Use the current questions format
+                        questions = st.session_state.questions
+                        updated_questions = autofill_answers_from_notes(notes_content, questions)
+                        
+                        if updated_questions:
+                            st.session_state.questions = updated_questions
+                            st.success("✅ Answers auto-populated from notes!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to auto-populate answers. Please try again.")
+                else:
+                    st.warning("⚠️ Please enter some notes first")
+        with col2:
+            st.caption("💡 AI will analyze your notes and automatically populate relevant answers to discovery questions")
+    
+    if 'questions' in st.session_state and st.session_state.questions:
+        questions = st.session_state.questions
+        
+        if isinstance(questions, list):
+            # New list format - with improved categorization
+            categories = {
+                'Technical': [],
+                'Business': [],
+                'Competitive': []
+            }
+            
+            # Try to categorize questions, with fallbacks
+            for q in questions:
+                if isinstance(q, dict):
+                    category = q.get('category', '').lower()
+                    text = q.get('text', '').lower()
+                    
+                    # Primary categorization by category field
+                    if 'technical' in category or 'tech' in category:
+                        categories['Technical'].append(q)
+                    elif 'business' in category or 'biz' in category:
+                        categories['Business'].append(q)
+                    elif 'competitive' in category or 'competitor' in category or 'competition' in category:
+                        categories['Competitive'].append(q)
+                    # Fallback categorization by question text
+                    elif any(word in text for word in ['technical', 'technology', 'system', 'integration', 'data', 'platform']):
+                        categories['Technical'].append(q)
+                    elif any(word in text for word in ['business', 'process', 'workflow', 'organization', 'team', 'department']):
+                        categories['Business'].append(q)
+                    elif any(word in text for word in ['competitor', 'competition', 'vendor', 'alternative', 'current solution']):
+                        categories['Competitive'].append(q)
+                    else:
+                        # Default to Technical if no clear category
+                        categories['Technical'].append(q)
+        else:
+            # Legacy dictionary format
+            categories = questions
+        
+        for category, category_questions in categories.items():
+            if category_questions:
+                # Count answered questions in this category
+                if isinstance(category_questions, list):
+                    answered_in_category = len([q for q in category_questions if isinstance(q, dict) and q.get('answer', '').strip()])
+                    total_in_category = len(category_questions)
+                else:
+                    answered_in_category = len([q for q in category_questions if q.get('answer', '').strip()])
+                    total_in_category = len(category_questions)
+                
+                with st.expander(f"**{category} Discovery ({answered_in_category}/{total_in_category})**", expanded=False):
+                    if isinstance(category_questions, list):
+                        # New list format
+                        for i, question in enumerate(category_questions):
+                            if isinstance(question, dict):
+                                col1, col2 = st.columns([5, 1])
+                                with col1:
+                                    st.markdown(f"**Q{i+1}:** {question.get('text', '')}")
+                                    if question.get('explanation'):
+                                        st.caption(f"💡 {question['explanation']}")
+                                with col2:
+                                    if st.button("🗑️", key=f"delete_{category}_{i}", help="Delete this question"):
+                                        category_questions.pop(i)
+                                        st.session_state.questions = questions
+                                        st.rerun()
+                                
+                                answer = st.text_area(
+                                    f"Answer {i+1}:",
+                                    value=question.get('answer', ''),
+                                    key=f"answer_{category}_{i}",
+                                    height=80
+                                )
+                                
+                                # Update answer in session state
+                                if answer != question.get('answer', ''):
+                                    question['answer'] = answer
+                                    st.session_state.questions = questions
+    
+    # Fallback: If no questions are displaying but we have questions in session state
+    if 'questions' in st.session_state and st.session_state.questions:
+        questions = st.session_state.questions
+        # Check if any categories have questions
+        has_categorized_questions = False
+        if isinstance(questions, list):
+            categories = {
+                'Technical': [q for q in questions if 'technical' in q.get('category', '').lower()],
+                'Business': [q for q in questions if 'business' in q.get('category', '').lower()],
+                'Competitive': [q for q in questions if 'competitive' in q.get('category', '').lower()]
+            }
+            has_categorized_questions = any(len(cat_q) > 0 for cat_q in categories.values())
+        else:
+            has_categorized_questions = bool(questions)
+            
+        # If no categorized questions but we have questions, show them all in one section
+        if not has_categorized_questions and isinstance(questions, list) and len(questions) > 0:
+            with st.expander(f"**All Discovery Questions ({len(questions)})**", expanded=True):
+                for i, question in enumerate(questions):
+                    if isinstance(question, dict):
+                        col1, col2 = st.columns([5, 1])
+                        with col1:
+                            st.markdown(f"**Q{i+1}:** {question.get('text', question.get('question', 'No question text'))}")
+                            if question.get('explanation'):
+                                st.caption(f"💡 {question['explanation']}")
+                        with col2:
+                            if st.button("🗑️", key=f"delete_all_{i}", help="Delete this question"):
+                                questions.pop(i)
+                                st.session_state.questions = questions
+                                st.rerun()
+                        
+                        answer = st.text_area(
+                            f"Answer {i+1}:",
+                            value=question.get('answer', ''),
+                            key=f"answer_all_{i}",
+                            height=80
+                        )
+                        
+                        # Update answer in session state
+                        if answer != question.get('answer', ''):
+                            question['answer'] = answer
+                            st.session_state.questions = questions
+
+with tab2:
+    st.markdown("## 📈 Value & Strategy")
+    
+    # Business Case Section
+    st.markdown("### 💼 Business Case")
+    business_case = st.session_state.get('business_case', '')
+    if business_case:
+        st.markdown(business_case)
+        
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("🤖 Generate Business Case", key="gen_business_case", use_container_width=True):
+            company_info = st.session_state.get('company_info', {})
+            questions = st.session_state.get('questions', [])
+            
+            if company_info and questions:
+                with st.spinner("🤖 Generating business case..."):
+                    discovery_notes = prepare_discovery_notes(questions)
+                    new_business_case = generate_business_case(company_info, discovery_notes)
+                    if new_business_case:
+                        st.session_state.business_case = new_business_case
+                        st.success("✅ Business case generated!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to generate business case")
+            else:
+                st.warning("⚠️ Complete company setup and discovery questions first")
+    with col2:
+        if not business_case:
+            st.info("No business case generated yet. Click the button to generate one.")
+    
+    # Roadmap Section
+    st.markdown("### 🗺️ Roadmap")
+    roadmap_df = st.session_state.get('roadmap_df', pd.DataFrame())
+    if not roadmap_df.empty:
+        st.dataframe(roadmap_df, use_container_width=True)
+        
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("🗺️ Generate Roadmap", key="gen_roadmap", use_container_width=True):
+            company_info = st.session_state.get('company_info', {})
+            questions = st.session_state.get('questions', [])
+            
+            if company_info and questions:
+                with st.spinner("🗺️ Generating roadmap..."):
+                    discovery_notes = prepare_discovery_notes(questions)
+                    new_roadmap = generate_roadmap(company_info, discovery_notes, "High")
+                    if new_roadmap:
+                        st.session_state.roadmap = new_roadmap
+                        st.session_state.roadmap_df = pd.DataFrame(new_roadmap)
+                        st.success("✅ Roadmap generated!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to generate roadmap")
+            else:
+                st.warning("⚠️ Complete company setup and discovery questions first")
+    with col2:
+        if roadmap_df.empty:
+            st.info("No roadmap data available. Click the button to generate one.")
+    
+    # Competitive Strategy Section
+    st.markdown("### 🎯 Competitive Strategy")
+    competitor_strategy = st.session_state.get('competitor_strategy', '')
+    if competitor_strategy:
+        st.markdown(competitor_strategy)
+        
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("🎯 Generate Competitive Strategy", key="gen_competitive", use_container_width=True):
+            company_info = st.session_state.get('company_info', {})
+            questions = st.session_state.get('questions', [])
+            
+            if company_info and questions:
+                with st.spinner("🎯 Generating competitive strategy..."):
+                    discovery_notes = prepare_discovery_notes(questions)
+                    new_strategy = generate_competitive_argument(company_info, discovery_notes)
+                    if new_strategy:
+                        st.session_state.competitor_strategy = new_strategy
+                        st.success("✅ Competitive strategy generated!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to generate competitive strategy")
+            else:
+                st.warning("⚠️ Complete company setup and discovery questions first")
+    with col2:
+        if not competitor_strategy:
+            st.info("No competitive strategy generated yet. Click the button to generate one.")
+    
+    # Value Hypothesis Section
+    st.markdown("### 💡 Value Hypothesis")
+    value_hypothesis = st.session_state.get('initial_value_hypothesis', '')
+    if value_hypothesis:
+        st.markdown(value_hypothesis)
+        
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("💡 Generate Value Hypothesis", key="gen_value_hyp", use_container_width=True):
+            company_info = st.session_state.get('company_info', {})
+            
+            if company_info:
+                with st.spinner("💡 Generating value hypothesis..."):
+                    new_hypothesis = generate_initial_value_hypothesis(company_info)
+                    if new_hypothesis:
+                        st.session_state.initial_value_hypothesis = new_hypothesis
+                        st.success("✅ Value hypothesis generated!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to generate value hypothesis")
+            else:
+                st.warning("⚠️ Complete company setup first")
+    with col2:
+        if not value_hypothesis:
+            st.info("No value hypothesis generated yet. Click the button to generate one.")
+
+with tab3:
+    st.markdown("## 📧 Outreach")
+    
+    # Email Outreach Section
+    st.markdown("### 📧 Email Templates")
+    outreach_emails = st.session_state.get('outreach_emails', {})
+    if outreach_emails:
+        if isinstance(outreach_emails, dict):
+            for email_type, content in outreach_emails.items():
+                with st.expander(f"📧 {email_type.replace('_', ' ').title()}", expanded=False):
+                    st.markdown(content)
+        else:
+            st.markdown(str(outreach_emails))
+            
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("📧 Generate Email Templates", key="gen_emails", use_container_width=True):
+            company_info = st.session_state.get('company_info', {})
+            questions = st.session_state.get('questions', [])
+            roadmap_df = st.session_state.get('roadmap_df', pd.DataFrame())
+            
+            if company_info and questions:
+                with st.spinner("📧 Generating email templates..."):
+                    discovery_notes = prepare_discovery_notes(questions)
+                    new_emails = generate_outreach_emails(company_info, discovery_notes, roadmap_df)
+                    if new_emails:
+                        st.session_state.outreach_emails = new_emails
+                        st.success("✅ Email templates generated!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to generate email templates")
+            else:
+                st.warning("⚠️ Complete company setup and discovery questions first")
+    with col2:
+        if not outreach_emails:
+            st.info("No email templates generated yet. Click the button to generate outreach content.")
+    
+    # LinkedIn Messages Section
+    st.markdown("### 💼 LinkedIn Messages")
+    linkedin_messages = st.session_state.get('linkedin_messages', {})
+    if linkedin_messages:
+        if isinstance(linkedin_messages, dict):
+            for message_type, content in linkedin_messages.items():
+                with st.expander(f"💼 {message_type.replace('_', ' ').title()}", expanded=False):
+                    st.markdown(content)
+        else:
+            st.markdown(str(linkedin_messages))
+            
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("💼 Generate LinkedIn Messages", key="gen_linkedin", use_container_width=True):
+            company_info = st.session_state.get('company_info', {})
+            questions = st.session_state.get('questions', [])
+            roadmap_df = st.session_state.get('roadmap_df', pd.DataFrame())
+            
+            if company_info and questions:
+                with st.spinner("💼 Generating LinkedIn messages..."):
+                    discovery_notes = prepare_discovery_notes(questions)
+                    new_messages = generate_linkedin_messages(company_info, discovery_notes, roadmap_df)
+                    if new_messages:
+                        st.session_state.linkedin_messages = new_messages
+                        st.success("✅ LinkedIn messages generated!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to generate LinkedIn messages")
+            else:
+                st.warning("⚠️ Complete company setup and discovery questions first")
+    with col2:
+        if not linkedin_messages:
+            st.info("No LinkedIn messages generated yet. Click the button to generate LinkedIn outreach.")
+
+with tab4:
+    st.markdown("## 👥 People Research")
+    
+    # People Research Section
+    people_research = st.session_state.get('people_research', [])
+    if people_research:
+        if isinstance(people_research, list) and people_research:
+            for i, person in enumerate(people_research):
+                with st.expander(f"👤 Person {i+1}", expanded=False):
+                    if isinstance(person, dict):
+                        for key, value in person.items():
+                            st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
+                    else:
+                        st.markdown(str(person))
+        elif isinstance(people_research, str) and people_research.strip():
+            st.markdown(people_research)
+        else:
+            st.info("No people research available.")
+    else:
+        st.info("No people research generated yet. Use external tools like LinkedIn, ZoomInfo, or Salesforce to research key contacts.")
+    
+    # Manual People Research Entry
+    st.markdown("### ➕ Add People Research")
+    with st.expander("Add New Contact Research", expanded=False):
+        st.markdown("**Manually add research about key contacts at the company:**")
+        
+        contact_name_input = st.text_input("Contact Name:", key="new_contact_name")
+        contact_title_input = st.text_input("Contact Title:", key="new_contact_title")
+        contact_linkedin = st.text_input("LinkedIn Profile:", key="new_contact_linkedin")
+        contact_background = st.text_area("Background/Notes:", key="new_contact_background", height=100)
+        
+        if st.button("➕ Add Contact Research", key="add_people_research"):
+            if contact_name_input and contact_title_input:
+                new_person = {
+                    "name": contact_name_input,
+                    "title": contact_title_input,
+                    "linkedin": contact_linkedin,
+                    "background": contact_background
+                }
+                
+                # Add to existing people research
+                current_research = st.session_state.get('people_research', [])
+                if not isinstance(current_research, list):
+                    current_research = []
+                
+                current_research.append(new_person)
+                st.session_state.people_research = current_research
+                st.success(f"✅ Added research for {contact_name_input}")
+                st.rerun()
+            else:
+                st.warning("⚠️ Please enter at least name and title")
+    
+    # Contact Information Section
+    st.markdown("### 📞 Primary Contact Information")
+    contact_name = st.session_state.get('contact_name', '')
+    contact_title = st.session_state.get('contact_title', '')
+    
+    if contact_name or contact_title:
+        col1, col2 = st.columns(2)
+        with col1:
+            if contact_name:
+                st.markdown(f"**Name:** {contact_name}")
+        with col2:
+            if contact_title:
+                st.markdown(f"**Title:** {contact_title}")
+    else:
+        st.info("No primary contact information saved. Set up contact details during company setup.")

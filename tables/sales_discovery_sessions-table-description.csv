@@ -1,0 +1,6 @@
+name,type,kind,null?,default,primary key,unique key,check,expression,comment,policy name,privacy domain
+SESSION_ID,VARCHAR(16777216),COLUMN,N,,Y,N,,,,,
+SESSION_NAME,VARCHAR(16777216),COLUMN,Y,,N,N,,,,,
+CREATED_AT,TIMESTAMP_NTZ(9),COLUMN,Y,CURRENT_TIMESTAMP(),N,N,,,,,
+SESSION_STATE,VARIANT,COLUMN,Y,,N,N,,,,,
+SAVED_BY_USER,VARCHAR(16777216),COLUMN,Y,,N,N,,,,,
