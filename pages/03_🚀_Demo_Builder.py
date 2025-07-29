@@ -145,6 +145,7 @@ if has_company:
                         'include_storytelling': include_storytelling
                     }
                     st.success("✅ Demo prompt generated successfully!")
+                    st.rerun()  # Refresh to show demo prompt immediately
                 else:
                     st.error("❌ Failed to generate demo prompt. Please try again.")
         
@@ -437,6 +438,7 @@ if has_company:
                                 st.success("✅ Mermaid diagram generated!")
                             else:
                                 st.success("✅ XML diagram generated!")
+                            st.rerun()  # Refresh to show diagrams immediately
                         else:
                             st.error("❌ Failed to generate architecture. Please try again.")
                 

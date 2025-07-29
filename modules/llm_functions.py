@@ -440,7 +440,16 @@ def autofill_answers_from_notes(notes_text, questions_input):
         for q in questions_input:
             if isinstance(q, dict):
                 category = q.get('category', '').lower()
-                text = q.get('text', '').lower()
+                text_field = q.get('text', '')
+                
+                # Handle case where 'text' might be a dictionary or other non-string type
+                if isinstance(text_field, str):
+                    text = text_field.lower()
+                elif isinstance(text_field, dict):
+                    # If text is a dict, try to extract string value
+                    text = str(text_field.get('text', text_field.get('question', str(text_field)))).lower()
+                else:
+                    text = str(text_field).lower()
                 
                 if 'technical' in category or 'tech' in category:
                     questions_dict['Technical'].append(q)
@@ -635,7 +644,7 @@ def generate_competitive_argument(company_info, discovery_notes_str):
 
 def generate_outreach_emails(company_info, discovery_notes_str, roadmap_df):
     """Generate outreach emails based on discovery and roadmap"""
-    roadmap_str = roadmap_df.to_string() if not roadmap_df.empty else "No roadmap generated yet."
+    roadmap_str = roadmap_df.to_string() if roadmap_df is not None and not roadmap_df.empty else "No roadmap generated yet."
     prompt = f"""
     You are an expert enterprise software salesperson specializing in high-value business outcomes. Your goal is to draft 2 distinct, compelling outreach emails to a **{company_info.get('contact_title', company_info.get('persona', 'contact'))}** at **{company_info.get('website')}**.
     
@@ -720,7 +729,7 @@ def regenerate_single_linkedin_message(company_info, discovery_notes_str, roadma
 
 def generate_linkedin_messages(company_info, discovery_notes_str, roadmap_df):
     """Generate LinkedIn messages for outreach"""
-    roadmap_str = roadmap_df.to_string() if not roadmap_df.empty else "No roadmap generated yet."
+    roadmap_str = roadmap_df.to_string() if roadmap_df is not None and not roadmap_df.empty else "No roadmap generated yet."
     prompt = f"""
     You are an expert at LinkedIn outreach focused on high-value business outcomes. Draft 2 distinct, concise LinkedIn messages to a **{company_info.get('contact_title', company_info.get('persona', 'contact'))}** at **{company_info.get('website')}**.
     
@@ -743,6 +752,50 @@ def generate_linkedin_messages(company_info, discovery_notes_str, roadmap_df):
     IMPORTANT: Return only valid JSON. Escape newlines as \\n.
     """
     return cortex_request(prompt)
+
+def generate_people_insights(company_info, contact_name, contact_title, background_notes, discovery_notes_str):
+    """Generate priority and engagement insights for a specific contact"""
+    prompt = f"""
+    You are an expert sales strategist analyzing a key contact for effective engagement. Based on the provided information, generate insights to help with strategic outreach.
+
+    **Company Context:**
+    - Website: {company_info.get('website', 'N/A')}
+    - Industry: {company_info.get('industry', 'N/A')}
+    - Primary Contact: {company_info.get('contact_name', 'N/A')}
+
+    **Target Contact:**
+    - Name: {contact_name}
+    - Title: {contact_title}
+    - Background: {background_notes}
+
+    **Discovery Insights:**
+    {discovery_notes_str}
+
+    **Analysis Required:**
+    Generate specific, actionable insights in JSON format with exactly these fields:
+
+    {{
+        "likely_priorities": [
+            "Priority 1 based on role and company context",
+            "Priority 2 specific to their title and responsibilities", 
+            "Priority 3 derived from background and industry"
+        ],
+        "engagement_strategies": [
+            "Specific approach 1 tailored to their role",
+            "Communication style 2 based on their background",
+            "Timing/method 3 optimized for their priorities"
+        ],
+        "key_talking_points": [
+            "Business value point 1 relevant to their role",
+            "Technical consideration 2 aligned with their priorities",
+            "Strategic initiative 3 that would interest them"
+        ]
+    }}
+
+    Focus on practical, role-specific insights that demonstrate understanding of their position and challenges.
+    """
+    
+    return cortex_request(prompt, json_output=True, suppress_warnings=True)
 
 def generate_demo_prompt_with_llm(company_info, discovery_notes_str, roadmap_df, value_hypothesis, strategy_content, people_research):
     """Generate a dynamic demo prompt using the selected LLM via Cortex Complete."""

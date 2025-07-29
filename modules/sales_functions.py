@@ -198,7 +198,7 @@ def perform_people_research(name, title):
             return None
 
 def auto_populate_answers():
-    """Auto-populate answers from meeting notes"""
+    """Auto-populate answers from meeting notes across all question sections"""
     notes = st.session_state.get('notes_content', '')
     questions = st.session_state.get('questions', {})
     
@@ -211,11 +211,52 @@ def auto_populate_answers():
         return
     
     with st.spinner("🤖 Analyzing notes and populating answers..."):
+        total_filled = 0
+        
+        # 1. Auto-fill main discovery questions
         populated_questions = autofill_answers_from_notes(notes, questions)
         
         if populated_questions:
             st.session_state.questions = populated_questions
-            st.success("✅ Successfully auto-populated answers from notes!")
+            # Count how many answers were filled
+            main_filled = len([q for q in populated_questions if isinstance(q, dict) and q.get('answer', '').strip()])
+            original_filled = len([q for q in questions if isinstance(q, dict) and q.get('answer', '').strip()])
+            total_filled += max(0, main_filled - original_filled)
+        
+        # 2. Auto-fill AI suggested initiative questions
+        summary_data = st.session_state.get('company_summary_data', {})
+        if isinstance(summary_data, dict) and 'suggested_initiatives' in summary_data:
+            initiatives = summary_data['suggested_initiatives']
+            if isinstance(initiatives, list):
+                for i, initiative in enumerate(initiatives):
+                    initiative_questions_key = f"initiative_questions_{i}"
+                    initiative_questions = st.session_state.get(initiative_questions_key, [])
+                    
+                    if initiative_questions:
+                        updated_initiative_questions = autofill_answers_from_notes(notes, initiative_questions)
+                        if updated_initiative_questions:
+                            st.session_state[initiative_questions_key] = updated_initiative_questions
+                            # Count filled answers
+                            new_filled = len([q for q in updated_initiative_questions if isinstance(q, dict) and q.get('answer', '').strip()])
+                            orig_filled = len([q for q in initiative_questions if isinstance(q, dict) and q.get('answer', '').strip()])
+                            total_filled += max(0, new_filled - orig_filled)
+        
+        # 3. Auto-fill custom initiative questions
+        custom_questions = st.session_state.get('custom_initiative_questions', [])
+        if custom_questions:
+            updated_custom_questions = autofill_answers_from_notes(notes, custom_questions)
+            if updated_custom_questions:
+                st.session_state['custom_initiative_questions'] = updated_custom_questions
+                # Count filled answers
+                new_filled = len([q for q in updated_custom_questions if isinstance(q, dict) and q.get('answer', '').strip()])
+                orig_filled = len([q for q in custom_questions if isinstance(q, dict) and q.get('answer', '').strip()])
+                total_filled += max(0, new_filled - orig_filled)
+        
+        # Show comprehensive success message
+        if total_filled > 0:
+            st.success(f"✅ Auto-populated {total_filled} answers across all question sections!")
+        elif populated_questions or any(st.session_state.get(f"initiative_questions_{i}") for i in range(10)) or st.session_state.get('custom_initiative_questions'):
+            st.info("✅ Success! Thanks for doing great discovery.")
         else:
             st.warning("Could not auto-populate answers. Please review manually.")
 

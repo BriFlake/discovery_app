@@ -230,6 +230,7 @@ else:
             st.markdown("**Your complete session summary:**")
             st.code(summary, language="markdown")
             st.success("✅ Summary generated! Copy the text above to share or save.")
+            st.rerun()  # Refresh to show summary immediately
     
     with col2:
         st.markdown("#### 📊 Raw Data (JSON)")
@@ -241,6 +242,7 @@ else:
             st.markdown("**Complete session data in JSON format:**")
             st.code(json_string, language="json")
             st.success("✅ JSON export generated! Copy the data above.")
+            st.rerun()  # Refresh to show JSON immediately
     
     st.divider()
     

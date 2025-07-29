@@ -10,245 +10,384 @@ from datetime import datetime
 from modules.snowflake_utils import execute_query
 
 def get_saved_sessions():
-    """Get saved sessions with instant progress calculation via optimized view"""
+    """Get saved sessions with robust error handling and fallbacks"""
     try:
         user_email = st.session_state.get('user_email', 'demo_user@company.com')
         
-        # Use the pre-computed view for instant results
-        query = """
-        SELECT 
-            session_id,
-            session_name,
-            company_name,
-            company_website,
-            competitor,
-            contact_name,
-            contact_title,
-            updated_at,
-            total_questions,
-            answered_questions,
-            completion_percentage,
-            content_types_count,
-            available_content,
-            contacts_count
-        FROM session_progress
-        WHERE user_email = ?
-        ORDER BY updated_at DESC
-        """
-        
-        sessions_df = execute_query(query, params=(user_email,))
-        
-        if not sessions_df.empty:
-            # Enhance display data
-            enhanced_sessions = []
+        # Try the simplest approach first - check for old-style sessions
+        try:
+            # First, try the old snowpublic.streamlit.discovery_sessions table
+            simple_query = """
+            SELECT 
+                session_id,
+                session_name,
+                company_name,
+                created_at as updated_at
+            FROM snowpublic.streamlit.discovery_sessions
+            WHERE user_email = ?
+            ORDER BY created_at DESC
+            LIMIT 10
+            """
             
-            for idx, row in sessions_df.iterrows():
-                # Parse available content for display
-                content_items = []
-                if row.get('available_content'):
-                    try:
-                        content_array = json.loads(row['available_content']) if isinstance(row['available_content'], str) else row['available_content']
-                        content_map = {
-                            'business_case': '💼 Business Case',
-                            'roadmap': '🗺️ Roadmap', 
-                            'competitive_strategy': '⚔️ Competitive',
-                            'value_hypothesis': '💡 Value Hypothesis',
-                            'outreach_emails': '📧 Outreach',
-                            'linkedin_messages': '💬 LinkedIn'
-                        }
-                        content_items = [content_map.get(item, item) for item in content_array if item in content_map]
-                    except:
-                        content_items = []
+            result = execute_query(simple_query, params=(user_email,))
+            
+            if not result.empty:
+                # Success with old system - format for display
+                result.columns = ['SESSION_ID', 'SESSION_NAME', 'COMPANY_NAME', 'UPDATED_AT']
                 
-                enhanced_session = {
-                    'SESSION_ID': row['session_id'],
-                    'SESSION_NAME': row['session_name'],
-                    'COMPANY_NAME': row.get('company_name', 'Unknown Company'),
-                    'COMPANY_WEBSITE': row.get('company_website', ''),
-                    'COMPETITOR': row.get('competitor', ''),
-                    'CONTACT_NAME': row.get('contact_name', ''),
-                    'CONTACT_TITLE': row.get('contact_title', ''),
-                    'UPDATED_AT': row['updated_at'],
-                    'TOTAL_QUESTIONS': int(row.get('total_questions', 0)),
-                    'ANSWERS_COUNT': int(row.get('answered_questions', 0)),
-                    'COMPLETION_PERCENTAGE': float(row.get('completion_percentage', 0)),
-                    'CONTENT_ITEMS': content_items,
-                    'CONTENT_COUNT': int(row.get('content_types_count', 0)),
-                    'CONTACTS_COUNT': int(row.get('contacts_count', 0)),
-                    'HAS_CONTENT': int(row.get('content_types_count', 0)) > 0
-                }
-                enhanced_sessions.append(enhanced_session)
-            
-            return pd.DataFrame(enhanced_sessions)
+                # Add default columns for compatibility
+                result['COMPANY_WEBSITE'] = ''
+                result['COMPETITOR'] = ''
+                result['CONTACT_NAME'] = ''
+                result['CONTACT_TITLE'] = ''
+                result['TOTAL_QUESTIONS'] = 0
+                result['ANSWERS_COUNT'] = 0
+                result['COMPLETION_PERCENTAGE'] = 0
+                result['CONTENT_COUNT'] = 0
+                result['CONTACTS_COUNT'] = 0
+                result['CONTENT_ITEMS'] = [[] for _ in range(len(result))]
+                result['HAS_CONTENT'] = False
+                
+                st.info(f"✅ Found {len(result)} sessions in legacy system")
+                return result
+                
+        except Exception as old_error:
+            # Old system failed, try new normalized schema
+            st.warning(f"⚠️ Legacy session system unavailable: {old_error}")
         
+        # Try new normalized schema with very simple query
+        try:
+            new_query = """
+            SELECT 
+                session_id,
+                session_name,
+                company_name,
+                updated_at
+            FROM discovery_sessions
+            WHERE user_email = ?
+            ORDER BY updated_at DESC
+            LIMIT 10
+            """
+            
+            result = execute_query(new_query, params=(user_email,))
+            
+            if not result.empty:
+                # Success with new system - format for display
+                result.columns = ['SESSION_ID', 'SESSION_NAME', 'COMPANY_NAME', 'UPDATED_AT']
+                
+                # Add default columns for compatibility
+                result['COMPANY_WEBSITE'] = ''
+                result['COMPETITOR'] = ''
+                result['CONTACT_NAME'] = ''
+                result['CONTACT_TITLE'] = ''
+                result['TOTAL_QUESTIONS'] = 0
+                result['ANSWERS_COUNT'] = 0
+                result['COMPLETION_PERCENTAGE'] = 0
+                result['CONTENT_COUNT'] = 0
+                result['CONTACTS_COUNT'] = 0
+                result['CONTENT_ITEMS'] = [[] for _ in range(len(result))]
+                result['HAS_CONTENT'] = False
+                
+                st.info(f"✅ Found {len(result)} sessions in new system")
+                return result
+                
+        except Exception as new_error:
+            # Both systems failed
+            st.error(f"❌ New session system error: {new_error}")
+            return pd.DataFrame()
+        
+        # No sessions found in either system
+        st.info("📭 No saved sessions found")
         return pd.DataFrame()
         
     except Exception as e:
-        st.error(f"Error loading saved sessions: {e}")
+        # Complete failure - show error and return empty
+        st.error(f"❌ Complete failure loading sessions: {e}")
         return pd.DataFrame()
 
 def load_session_data(session_id):
-    """Load complete session data with seamless UI restoration"""
+    """Load complete session data with robust fallback handling"""
     try:
         # Clear existing session state first
         clear_session_data()
         
-        # 1. Load core session info
-        session_query = """
-        SELECT session_id, session_name, user_email, company_name, company_website,
-               competitor, contact_name, contact_title, notes
-        FROM discovery_sessions 
-        WHERE session_id = ?
-        """
-        
-        session_result = execute_query(session_query, params=(session_id,))
-        
-        if session_result.empty:
-            st.error("❌ Session not found")
-            return False
-        
-        session_info = session_result.iloc[0]
-        
-        # 2. Load questions and answers efficiently
-        qa_query = """
-        SELECT 
-            q.question_id,
-            q.category,
-            q.question_text,
-            q.explanation,
-            q.importance,
-            q.question_order,
-            a.answer_text,
-            a.confidence_level
-        FROM discovery_questions q
-        LEFT JOIN discovery_answers a ON q.question_id = a.question_id
-        WHERE q.session_id = ?
-        ORDER BY q.question_order, q.question_id
-        """
-        
-        qa_result = execute_query(qa_query, params=(session_id,))
-        
-        # 3. Load strategic content
-        content_query = """
-        SELECT content_type, content_text, content_data
-        FROM session_content
-        WHERE session_id = ?
-        """
-        
-        content_result = execute_query(content_query, params=(session_id,))
-        
-        # 4. Load contacts
-        contacts_query = """
-        SELECT contact_name, contact_title, contact_linkedin, 
-               background_notes, contact_type
-        FROM session_contacts
-        WHERE session_id = ?
-        ORDER BY CASE WHEN contact_type = 'primary' THEN 1 ELSE 2 END
-        """
-        
-        contacts_result = execute_query(contacts_query, params=(session_id,))
-        
-        # 5. Restore session state systematically
-        st.session_state.current_session_id = session_id
-        
-        # Restore company info
-        st.session_state.company_info = {
-            'name': session_info.get('company_name'),
-            'website': session_info.get('company_website'),
-            'account_name': session_info.get('company_name')
-        }
-        
-        # Restore contact info
-        if session_info.get('contact_name'):
-            st.session_state.contact_name = session_info['contact_name']
-        if session_info.get('contact_title'):
-            st.session_state.contact_title = session_info['contact_title']
-        if session_info.get('competitor'):
-            st.session_state.competitor = session_info['competitor']
-        
-        # Restore questions in the current format (list of dicts)
-        questions = []
-        if not qa_result.empty:
-            for _, row in qa_result.iterrows():
-                question = {
-                    'id': row['question_id'],
-                    'text': row['question_text'],
-                    'category': row['category'],
-                    'explanation': row.get('explanation', ''),
-                    'importance': row.get('importance', 'medium'),
-                    'answer': row.get('answer_text', '') if pd.notna(row.get('answer_text')) else ''
-                }
-                questions.append(question)
-        
-        st.session_state.questions = questions
-        
-        # Restore strategic content
-        if not content_result.empty:
-            for _, row in content_result.iterrows():
-                content_type = row['content_type']
+        # Try to load from legacy system first (most reliable)
+        try:
+            legacy_query = """
+            SELECT SESSION_ID, SESSION_NAME, FULL_SESSION_STATE, CREATED_AT, USER_EMAIL, COMPANY_NAME
+            FROM snowpublic.streamlit.discovery_sessions
+            WHERE SESSION_ID = ?
+            """
+            
+            legacy_result = execute_query(legacy_query, params=(session_id,))
+            
+            if not legacy_result.empty:
+                session_row = legacy_result.iloc[0]
                 
-                if content_type == 'business_case':
-                    st.session_state.business_case = row.get('content_text', '')
-                elif content_type == 'competitive_strategy':
-                    st.session_state.competitive_strategy = row.get('content_text', '')
-                elif content_type == 'value_hypothesis':
-                    st.session_state.initial_value_hypothesis = row.get('content_text', '')
-                elif content_type == 'roadmap':
-                    if row.get('content_data'):
-                        try:
-                            roadmap_data = json.loads(row['content_data']) if isinstance(row['content_data'], str) else row['content_data']
-                            roadmap_df = pd.DataFrame(roadmap_data)
-                            st.session_state.roadmap = roadmap_df
-                            st.session_state.roadmap_df = roadmap_df
-                        except:
-                            pass
-                elif content_type == 'outreach_emails':
-                    if row.get('content_data'):
-                        try:
-                            emails_data = json.loads(row['content_data']) if isinstance(row['content_data'], str) else row['content_data']
-                            st.session_state.outreach_emails = emails_data
-                        except:
-                            pass
-                elif content_type == 'linkedin_messages':
-                    if row.get('content_data'):
-                        try:
-                            linkedin_data = json.loads(row['content_data']) if isinstance(row['content_data'], str) else row['content_data']
-                            st.session_state.linkedin_messages = linkedin_data
-                        except:
-                            pass
-        
-        # Restore people research
-        if not contacts_result.empty:
-            people_research = []
-            for _, row in contacts_result.iterrows():
-                contact = {
-                    'name': row.get('contact_name', ''),
-                    'title': row.get('contact_title', ''),
-                    'linkedin': row.get('contact_linkedin', ''),
-                    'background': row.get('background_notes', ''),
-                    'type': row.get('contact_type', 'stakeholder')
-                }
-                people_research.append(contact)
+                # Parse session state (JSON format)
+                session_state_str = session_row.get('FULL_SESSION_STATE', '{}')
+                if isinstance(session_state_str, str):
+                    try:
+                        session_data = json.loads(session_state_str)
+                    except json.JSONDecodeError:
+                        session_data = {}
+                else:
+                    session_data = session_state_str if isinstance(session_state_str, dict) else {}
+                
+                # Restore session state from legacy format
+                st.session_state.current_session_id = session_id
+                
+                # Restore company info
+                company_info = session_data.get('company_info', {})
+                if isinstance(company_info, str):
+                    company_info = {'name': company_info, 'website': company_info}
+                elif not isinstance(company_info, dict):
+                    company_info = {'name': str(company_info) if company_info else 'Unknown Company'}
+                st.session_state.company_info = company_info
+                
+                # Restore questions with robust format handling
+                questions = session_data.get('questions', [])
+                if isinstance(questions, dict):
+                    # Convert old dictionary format to list format
+                    questions_list = []
+                    for category, category_questions in questions.items():
+                        if isinstance(category_questions, list):
+                            for q in category_questions:
+                                if isinstance(q, dict):
+                                    formatted_q = {
+                                        'id': q.get('id', str(uuid.uuid4())),
+                                        'text': q.get('text', q.get('question', '')),
+                                        'category': q.get('category', category),
+                                        'explanation': q.get('explanation', ''),
+                                        'importance': q.get('importance', 'medium'),
+                                        'answer': q.get('answer', '')
+                                    }
+                                    questions_list.append(formatted_q)
+                    questions = questions_list
+                elif isinstance(questions, list):
+                    # Already in list format, ensure each question has required fields
+                    formatted_questions = []
+                    for q in questions:
+                        if isinstance(q, dict):
+                            formatted_q = {
+                                'id': q.get('id', str(uuid.uuid4())),
+                                'text': q.get('text', q.get('question', '')),
+                                'category': q.get('category', 'Technical'),
+                                'explanation': q.get('explanation', ''),
+                                'importance': q.get('importance', 'medium'),
+                                'answer': q.get('answer', '')
+                            }
+                            formatted_questions.append(formatted_q)
+                        elif isinstance(q, str):
+                            # Handle case where question is just a string
+                            formatted_q = {
+                                'id': str(uuid.uuid4()),
+                                'text': q,
+                                'category': 'Technical',
+                                'explanation': '',
+                                'importance': 'medium',
+                                'answer': ''
+                            }
+                            formatted_questions.append(formatted_q)
+                    questions = formatted_questions
+                
+                st.session_state.questions = questions
+                
+                # Restore other data with safe access
+                for key, session_key in [
+                    ('business_case', 'business_case'),
+                    ('competitive_strategy', 'competitive_strategy'),
+                    ('initial_value_hypothesis', 'initial_value_hypothesis'),
+                    ('outreach_emails', 'outreach_emails'),
+                    ('linkedin_messages', 'linkedin_messages'),
+                    ('people_research', 'people_research'),
+                    ('company_summary_data', 'company_summary_data')
+                ]:
+                    if key in session_data:
+                        st.session_state[session_key] = session_data[key]
+                
+                # Handle roadmap data specially
+                if 'roadmap_df' in session_data:
+                    try:
+                        roadmap_data = session_data['roadmap_df']
+                        if isinstance(roadmap_data, list) and roadmap_data:
+                            st.session_state.roadmap_df = pd.DataFrame(roadmap_data)
+                        elif isinstance(roadmap_data, dict) and roadmap_data:
+                            # Convert dict to DataFrame
+                            st.session_state.roadmap_df = pd.DataFrame([roadmap_data])
+                    except Exception:
+                        pass  # Skip if roadmap data is corrupted
+                
+                # Calculate and show success message
+                answered_count = len([q for q in questions if isinstance(q, dict) and q.get('answer', '').strip()])
+                total_count = len(questions)
+                completion = (answered_count / total_count * 100) if total_count > 0 else 0
+                
+                st.success(f"✅ **{session_row['SESSION_NAME']}** loaded successfully • {answered_count}/{total_count} questions ({completion:.0f}%)")
+                
+                return True
             
-            st.session_state.people_research = people_research
+        except Exception as legacy_error:
+            # Legacy system failed, try new normalized schema
+            st.info(f"📝 Legacy system unavailable, trying new schema...")
             
-            # Set primary contact if exists
-            primary_contact = next((c for c in people_research if c['type'] == 'primary'), None)
-            if primary_contact:
-                st.session_state.contact_name = primary_contact['name']
-                st.session_state.contact_title = primary_contact['title']
+            try:
+                # 1. Load core session info from new schema
+                session_query = """
+                SELECT session_id, session_name, user_email, company_name, company_website,
+                       competitor, contact_name, contact_title, notes
+                FROM discovery_sessions 
+                WHERE session_id = ?
+                """
+                
+                session_result = execute_query(session_query, params=(session_id,))
+                
+                if not session_result.empty:
+                    session_info = session_result.iloc[0]
+                    
+                    # 2. Load questions and answers efficiently - with error handling
+                    try:
+                        qa_query = """
+                        SELECT 
+                            q.question_id,
+                            q.category,
+                            q.question_text,
+                            q.explanation,
+                            q.importance,
+                            q.question_order,
+                            a.answer_text,
+                            a.confidence_level
+                        FROM discovery_questions q
+                        LEFT JOIN discovery_answers a ON q.question_id = a.question_id
+                        WHERE q.session_id = ?
+                        ORDER BY q.question_order, q.question_id
+                        """
+                        
+                        qa_result = execute_query(qa_query, params=(session_id,))
+                    except Exception:
+                        qa_result = pd.DataFrame()  # Empty if questions table doesn't exist
+                    
+                    # 3. Load strategic content - with error handling
+                    try:
+                        content_query = """
+                        SELECT content_type, content_text, content_data
+                        FROM session_content
+                        WHERE session_id = ?
+                        """
+                        content_result = execute_query(content_query, params=(session_id,))
+                    except Exception:
+                        content_result = pd.DataFrame()
+                    
+                    # 4. Load contacts - with error handling
+                    try:
+                        contacts_query = """
+                        SELECT contact_name, contact_title, contact_linkedin, 
+                               background_notes, contact_type
+                        FROM session_contacts
+                        WHERE session_id = ?
+                        ORDER BY CASE WHEN contact_type = 'primary' THEN 1 ELSE 2 END
+                        """
+                        contacts_result = execute_query(contacts_query, params=(session_id,))
+                    except Exception:
+                        contacts_result = pd.DataFrame()
+                    
+                    # 5. Restore session state systematically
+                    st.session_state.current_session_id = session_id
+                    
+                    # Restore company info
+                    st.session_state.company_info = {
+                        'name': session_info.get('company_name', ''),
+                        'website': session_info.get('company_website', ''),
+                        'account_name': session_info.get('company_name', '')
+                    }
+                    
+                    # Restore questions in the current format (list of dicts)
+                    questions = []
+                    if not qa_result.empty:
+                        for _, row in qa_result.iterrows():
+                            question = {
+                                'id': row['question_id'],
+                                'text': row['question_text'],
+                                'category': row['category'],
+                                'explanation': row.get('explanation', ''),
+                                'importance': row.get('importance', 'medium'),
+                                'answer': row.get('answer_text', '') if pd.notna(row.get('answer_text')) else ''
+                            }
+                            questions.append(question)
+                    
+                    st.session_state.questions = questions
+                    
+                    # Restore strategic content
+                    if not content_result.empty:
+                        for _, row in content_result.iterrows():
+                            content_type = row['content_type']
+                            
+                            if content_type == 'business_case':
+                                st.session_state.business_case = row.get('content_text', '')
+                            elif content_type == 'competitive_strategy':
+                                st.session_state.competitive_strategy = row.get('content_text', '')
+                            elif content_type == 'value_hypothesis':
+                                st.session_state.initial_value_hypothesis = row.get('content_text', '')
+                            elif content_type == 'roadmap':
+                                if row.get('content_data'):
+                                    try:
+                                        roadmap_data = json.loads(row['content_data']) if isinstance(row['content_data'], str) else row['content_data']
+                                        roadmap_df = pd.DataFrame(roadmap_data)
+                                        st.session_state.roadmap_df = roadmap_df
+                                    except Exception:
+                                        pass
+                            elif content_type == 'outreach_emails':
+                                if row.get('content_data'):
+                                    try:
+                                        emails_data = json.loads(row['content_data']) if isinstance(row['content_data'], str) else row['content_data']
+                                        st.session_state.outreach_emails = emails_data
+                                    except Exception:
+                                        pass
+                            elif content_type == 'linkedin_messages':
+                                if row.get('content_data'):
+                                    try:
+                                        linkedin_data = json.loads(row['content_data']) if isinstance(row['content_data'], str) else row['content_data']
+                                        st.session_state.linkedin_messages = linkedin_data
+                                    except Exception:
+                                        pass
+                    
+                    # Restore people research
+                    if not contacts_result.empty:
+                        people_research = []
+                        for _, row in contacts_result.iterrows():
+                            contact = {
+                                'name': row.get('contact_name', ''),
+                                'title': row.get('contact_title', ''),
+                                'linkedin': row.get('contact_linkedin', ''),
+                                'background': row.get('background_notes', ''),
+                                'type': row.get('contact_type', 'stakeholder')
+                            }
+                            people_research.append(contact)
+                        
+                        st.session_state.people_research = people_research
+                    
+                    # Calculate and show success message
+                    answered_count = len([q for q in questions if isinstance(q, dict) and q.get('answer', '').strip()])
+                    total_count = len(questions)
+                    completion = (answered_count / total_count * 100) if total_count > 0 else 0
+                    
+                    st.success(f"✅ **{session_info['session_name']}** loaded successfully (new format) • {answered_count}/{total_count} questions ({completion:.0f}%)")
+                    
+                    return True
+                else:
+                    st.error("❌ Session not found in new schema either")
+                    return False
+                    
+            except Exception as new_schema_error:
+                st.error(f"❌ Both systems failed - Legacy: {legacy_error}, New: {new_schema_error}")
+                return False
         
-        # Calculate and show success message
-        answered_count = len([q for q in questions if q.get('answer', '').strip()])
-        total_count = len(questions)
-        completion = (answered_count / total_count * 100) if total_count > 0 else 0
-        
-        st.success(f"✅ **{session_info['session_name']}** loaded successfully • {answered_count}/{total_count} questions ({completion:.0f}%)")
-        
-        return True
+        # If we get here, session wasn't found in either system
+        st.error("❌ Session not found in any system")
+        return False
         
     except Exception as e:
-        st.error(f"❌ Error loading session: {e}")
+        st.error(f"❌ Critical error loading session: {e}")
         return False
 
 def save_current_session():
@@ -256,6 +395,15 @@ def save_current_session():
     try:
         # Validate we have data to save
         company_info = st.session_state.get('company_info', {})
+        
+        # Ensure company_info is a dictionary
+        if not isinstance(company_info, dict):
+            if isinstance(company_info, str):
+                # Convert string to dict format (assume it's a company name)
+                company_info = {'name': company_info}
+            else:
+                company_info = {}
+        
         if not company_info.get('website') and not company_info.get('name'):
             st.warning("⚠️ No company data to save. Please load company information first.")
             return False
@@ -314,6 +462,20 @@ def save_current_session():
             
             # Insert questions and answers
             for i, q in enumerate(questions):
+                # Validate question format - handle both dict and string formats
+                if isinstance(q, str):
+                    # Convert string to dict format
+                    q = {
+                        'text': q,
+                        'category': 'Technical',
+                        'explanation': '',
+                        'importance': 'medium',
+                        'answer': ''
+                    }
+                elif not isinstance(q, dict):
+                    # Skip invalid question formats
+                    continue
+                
                 question_id = f"{session_id}-q-{i+1}"
                 
                 # Insert question
@@ -393,6 +555,20 @@ def save_current_session():
             
             # Insert contacts
             for i, person in enumerate(people_research):
+                # Validate person format - handle both dict and string formats
+                if isinstance(person, str):
+                    # Convert string to dict format (assume it's a name)
+                    person = {
+                        'name': person,
+                        'title': '',
+                        'linkedin': '',
+                        'background': '',
+                        'type': 'stakeholder'
+                    }
+                elif not isinstance(person, dict):
+                    # Skip invalid person formats
+                    continue
+                
                 contact_id = f"{session_id}-contact-{i+1}"
                 contact_query = """
                 INSERT INTO session_contacts 
@@ -406,7 +582,6 @@ def save_current_session():
                     person.get('background', ''), person.get('type', 'stakeholder')
                 ))
         
-        st.success(f"✅ Session saved: {session_name}")
         return True
         
     except Exception as e:

@@ -4,6 +4,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+import time
 
 def render_session_header():
     """Render session information header"""
@@ -216,7 +217,6 @@ def render_people_research_cards():
             with col2:
                 if st.button("Remove", key=f"remove_person_{i}"):
                     st.session_state.people_research.pop(i)
-                    st.rerun()
             
             # Insights
             if person.get('insights'):
@@ -383,12 +383,12 @@ def render_navigation_sidebar():
                 try:
                     # Try new normalized system first
                     from modules.session_management_v2 import save_current_session
-                    save_current_session()
+                    success = save_current_session()
                 except ImportError:
                     # Fallback to old system
                     try:
                         from modules.session_management import save_current_session
-                        save_current_session()
+                        success = save_current_session()
                     except Exception as e:
                         st.error(f"❌ Could not save session: {e}")
                 except Exception as e:
@@ -413,7 +413,6 @@ def render_navigation_sidebar():
                         from modules.session_management_v2 import clear_session_data
                         clear_session_data()
                         st.success("🆕 Started fresh session!")
-                        st.rerun()
                     except ImportError:
                         # Ultimate fallback
                         session_keys_to_clear = [
@@ -427,7 +426,6 @@ def render_navigation_sidebar():
                             if key in st.session_state:
                                 del st.session_state[key]
                         st.success("🆕 Started fresh session!")
-                        st.rerun()
             except Exception as e:
                 st.error(f"❌ Error starting new session: {e}")
         
